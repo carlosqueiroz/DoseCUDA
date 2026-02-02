@@ -263,18 +263,32 @@ class IMRTPlan(Plan):
             self._load_beam_model_parameters(beam_model, machine_name, f)
             self.beam_models.append(beam_model)
 
-    def _load_beam_model_parameters(self, beam_model, machine_name, folder_energy_label):
-        """Load beam model parameters from lookup tables"""
+    def _load_beam_model_parameters(self, beam_model, machine_name, folder_energy_label, mlc_geometry_from_dicom=None):
+        """Load beam model parameters from lookup tables
+        
+        Args:
+            mlc_geometry_from_dicom: tuple (n_pairs, offsets, widths) from DICOM or None to use CSV
+        """
         path_to_model = os.path.join("lookuptables", "photons", machine_name)
         
-        # Load MLC geometry
-        mlc_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "mlc_geometry.csv"))
-        mlc_geometry = pd.read_csv(mlc_geometry_path)
-        
-        beam_model.mlc_index = mlc_geometry["mlc_pair_index"].to_numpy()
-        beam_model.mlc_widths = mlc_geometry["width"].to_numpy()
-        beam_model.mlc_offsets = mlc_geometry["center_offset"].to_numpy()
-        beam_model.n_mlc_pairs = len(beam_model.mlc_index)
+        # Load MLC geometry: priorizar DICOM, usar CSV como fallback
+        if mlc_geometry_from_dicom is not None:
+            n_pairs, offsets, widths = mlc_geometry_from_dicom
+            beam_model.mlc_index = np.arange(n_pairs, dtype=np.int32)
+            beam_model.mlc_offsets = offsets
+            beam_model.mlc_widths = widths
+            beam_model.n_mlc_pairs = n_pairs
+            print(f"✓ MLC geometry carregada do DICOM: {n_pairs} pares (LeafPositionBoundaries)")
+        else:
+            # Fallback: carregar do CSV
+            mlc_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "mlc_geometry.csv"))
+            mlc_geometry = pd.read_csv(mlc_geometry_path)
+            
+            beam_model.mlc_index = mlc_geometry["mlc_pair_index"].to_numpy()
+            beam_model.mlc_widths = mlc_geometry["width"].to_numpy()
+            beam_model.mlc_offsets = mlc_geometry["center_offset"].to_numpy()
+            beam_model.n_mlc_pairs = len(beam_model.mlc_index)
+            print(f"⚠ MLC geometry carregada do CSV (fallback): {beam_model.n_mlc_pairs} pares")
 
         # Load kernel
         kernel_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel.csv"))
@@ -477,6 +491,9 @@ class IMRTPlan(Plan):
 
         self.beam_list = []
         self.n_beams = 0
+        
+        # P1.5: Variável para armazenar MLC geometry do DICOM (extraída do primeiro beam)
+        mlc_geometry_from_dicom = None
 
         for beam in ds.BeamSequence:
             # Skip non-treatment beams (e.g., setup fields)
@@ -491,6 +508,19 @@ class IMRTPlan(Plan):
 
             # Validar modificadores não suportados (wedges, compensators, etc.)
             self._validate_beam_modifiers(beam, beam_number)
+
+            # P1.5: Extrair MLC geometry do DICOM (se disponível)
+            # Isso é feito uma vez no primeiro beam e reutilizado
+            if self.n_beams == 0 and len(self.beam_models) == 0:
+                mlc_geometry_from_dicom = self._extract_mlc_geometry_from_dicom(beam)
+                if mlc_geometry_from_dicom is not None:
+                    # Recarregar beam models com MLC geometry do DICOM
+                    self.beam_models = []
+                    for energy_label in self.dicom_energy_label:
+                        beam_model = IMRTPhotonEnergy(self.machine_name, energy_label)
+                        folder_energy_label = self._normalize_energy_for_folder(energy_label)
+                        self._load_beam_model_parameters(beam_model, self.machine_name, folder_energy_label, mlc_geometry_from_dicom)
+                        self.beam_models.append(beam_model)
 
             beam_meterset = beam_meterset_map[beam_number]
 
