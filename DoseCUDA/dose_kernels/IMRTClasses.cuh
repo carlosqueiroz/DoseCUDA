@@ -52,7 +52,12 @@ class IMRTBeam : public CudaBeam{
             bool has_xjaws;
             bool has_yjaws;
 
-            float * kernel;
+            // FASE 2: Kernel dependente de profundidade
+            float * kernel;  // Mantido para compatibilidade (fallback)
+            float * kernel_depths;  // Profundidades [0, 5, 10, 15, 20, 25, 30] cm
+            float * kernel_params;  // [n_depths x 6_angles x 4_params] = [n_depths x 24]
+            int n_kernel_depths;    // Número de profundidades (ex: 7)
+            bool use_depth_dependent_kernel;  // Flag para usar kernel z-dependente
 
         } model;
 
@@ -63,6 +68,10 @@ class IMRTBeam : public CudaBeam{
 
 		MLCPair * mlc;  // MLC leaf pairs
         int n_mlc_pairs;    // Number of leaf pairs
+        
+        // Jaws positions [mm] (divergent coordinate at jaw plane)
+        float xjaws[2];  // [x1, x2] negative to positive patient left
+        float yjaws[2];  // [y1, y2] inferior to superior
 
         __host__ IMRTBeam(IMRTBeam * h_beam);
 		__host__ IMRTBeam(float * iso, float gantry_angle, float couch_angle, float collimator_angle, const Model * model);
@@ -73,10 +82,9 @@ class IMRTBeam : public CudaBeam{
 
         /** Tilt an IMAGE-space tangent vector such that its z points toward the source */
         __device__ void kernelTilt(const PointXYZ * vox_img_xyz, PointXYZ * vec_img);
-
-		/** Takes collimator angle into account */
-		__device__ void pointXYZImageToHead(const PointXYZ * point_img, PointXYZ * point_head);
-
+        
+        /** FASE 2: Interpolate kernel parameters based on depth (z') */
+        __device__ void interpolateKernelParams(int angle_idx, float z_prime, float * Am, float * am, float * Bm, float * bm);
 		/** Takes collimator angle into account */
         __device__ void pointXYZHeadToImage(const PointXYZ * point_head, PointXYZ * point_img);
 
@@ -92,8 +100,8 @@ class IMRTDose : public CudaDose{
 
 };
 
-__global__ void termaKernel(IMRTDose * dose, IMRTBeam * beam, float * TERMAArray, float * ElectronArray);
-__global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATexture, Texture3D DensityTexture, float * ElectronArray);
+__global__ void termaKernel(IMRTDose * dose, IMRTBeam * beam, float * TERMAPrimaryArray, float * TERMAExtrafocalArray, float * ElectronArray);
+__global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMAPrimaryTexture, Texture3D TERMAExtrafocalTexture, Texture3D DensityTexture, float * ElectronArray);
 
 void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam);
 

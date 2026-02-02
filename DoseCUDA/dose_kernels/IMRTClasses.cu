@@ -123,7 +123,29 @@ __device__ float IMRTBeam::headTransmission(const PointXYZ* point_xyz, const flo
 	const float divergence_scale = (iso_to_source - point_xyz->z) / (model.mlc_distance - point_xyz->z);
 	const float invSqrt2_x = 1.0f / (source_sigma * sqrtf(2.f));
     const float invSqrt2_y = 1.0f / (source_sigma * sqrtf(2.f));
-	float transmission = 0.0f;
+	
+	// ========== ETAPA 1: JAWS (interseção retangular divergente) ==========
+	float jaw_transmission_factor = 1.0f;
+	
+	if (model.has_xjaws || model.has_yjaws) {
+		// Projetar jaws do plano jaw/MLC para plano do voxel (divergente)
+		const float xLeft_jaw  = ((xjaws[0] * mlc_scale - point_xyz->x) * divergence_scale) + point_xyz->x;
+		const float xRight_jaw = ((xjaws[1] * mlc_scale - point_xyz->x) * divergence_scale) + point_xyz->x;
+		const float yBot_jaw   = ((yjaws[0] * mlc_scale - point_xyz->y) * divergence_scale) + point_xyz->y;
+		const float yTop_jaw   = ((yjaws[1] * mlc_scale - point_xyz->y) * divergence_scale) + point_xyz->y;
+		
+		// Fração exposta pela jaw (gaussiana integrada)
+		const float exposedSourceX_jaw = 0.5f * (erff(xRight_jaw * invSqrt2_x) - erff(xLeft_jaw * invSqrt2_x));
+		const float exposedSourceY_jaw = 0.5f * (erff(yTop_jaw * invSqrt2_y) - erff(yBot_jaw * invSqrt2_y));
+		
+		float jaw_open_fraction = exposedSourceX_jaw * exposedSourceY_jaw;
+		
+		// Transmissão: se jaw fechada (fração < limiar), aplicar leakage
+		jaw_transmission_factor = fmaxf(jaw_open_fraction, model.jaw_transmission);
+	}
+	
+	// ========== ETAPA 2: MLC (folhas leaf-by-leaf) ==========
+	float mlc_transmission = 0.0f;
 
     for (int i = 0; i < this->n_mlc_pairs; ++i) {
 
@@ -142,10 +164,15 @@ __device__ float IMRTBeam::headTransmission(const PointXYZ* point_xyz, const flo
 		const float exposedSourceX = 0.5f * (erff(tipMLC2 * invSqrt2_x) - erff(tipMLC1 * invSqrt2_x));
 		const float exposedSourceY = 0.5f * (erff(edgeMLC2 * invSqrt2_y) - erff(edgeMLC1 * invSqrt2_y));
 
-		transmission += exposedSourceX * exposedSourceY;
+		float leaf_pair_open_fraction = exposedSourceX * exposedSourceY;
+		
+		// Aplicar leakage MLC: quando fechado, não é zero
+		mlc_transmission += fmaxf(leaf_pair_open_fraction, model.mlc_transmission);
     }
 
-    return transmission;
+    // ========== ETAPA 3: COMBINAÇÃO (jaws ∩ MLC) ==========
+    // Transmissão final = jaws * MLC (geometria em série)
+    return jaw_transmission_factor * mlc_transmission;
 
 }
 
@@ -202,11 +229,67 @@ __device__ void IMRTBeam::kernelTilt(const PointXYZ * vox_img_xyz, PointXYZ * ve
 	*vec_img = result;
 }
 
+__device__ void IMRTBeam::interpolateKernelParams(int angle_idx, float z_prime, float * Am, float * am, float * Bm, float * bm){
+	
+	// FASE 2: Interpolar parâmetros do kernel baseado na profundidade z' (WET)
+	
+	// Se não usar kernel z-dependente, usar kernel fixo (fallback)
+	if (!model.use_depth_dependent_kernel || model.kernel_depths == nullptr) {
+		*Am = model.kernel[angle_idx + 6];
+		*am = model.kernel[angle_idx + 12];
+		*Bm = model.kernel[angle_idx + 18];
+		*bm = model.kernel[angle_idx + 24];
+		return;
+	}
+	
+	// Clampar z_prime dentro dos limites da LUT
+	z_prime = fmaxf(model.kernel_depths[0], fminf(z_prime, model.kernel_depths[model.n_kernel_depths - 1]));
+	
+	// Buscar índice inferior (binary search implícita via lowerBound)
+	int depth_idx = lowerBound(model.kernel_depths, model.n_kernel_depths, z_prime);
+	
+	// Casos extremos: fora dos limites
+	if (depth_idx == model.n_kernel_depths) {
+		// Além do último ponto: usar último valor
+		int base_idx = (model.n_kernel_depths - 1) * 24 + angle_idx * 4;
+		*Am = model.kernel_params[base_idx + 0];
+		*am = model.kernel_params[base_idx + 1];
+		*Bm = model.kernel_params[base_idx + 2];
+		*bm = model.kernel_params[base_idx + 3];
+		return;
+	}
+	
+	if (depth_idx == 0) {
+		// Antes do primeiro ponto: usar primeiro valor
+		int base_idx = angle_idx * 4;
+		*Am = model.kernel_params[base_idx + 0];
+		*am = model.kernel_params[base_idx + 1];
+		*Bm = model.kernel_params[base_idx + 2];
+		*bm = model.kernel_params[base_idx + 3];
+		return;
+	}
+	
+	// Interpolação linear entre depth_idx-1 e depth_idx
+	float z0 = model.kernel_depths[depth_idx - 1];
+	float z1 = model.kernel_depths[depth_idx];
+	float t = (z_prime - z0) / (z1 - z0);  // Fator de interpolação [0, 1]
+	
+	// Índices na LUT
+	int base_idx0 = (depth_idx - 1) * 24 + angle_idx * 4;
+	int base_idx1 = depth_idx * 24 + angle_idx * 4;
+	
+	// Interpolar cada parâmetro
+	*Am = fmaf(t, model.kernel_params[base_idx1 + 0] - model.kernel_params[base_idx0 + 0], model.kernel_params[base_idx0 + 0]);
+	*am = fmaf(t, model.kernel_params[base_idx1 + 1] - model.kernel_params[base_idx0 + 1], model.kernel_params[base_idx0 + 1]);
+	*Bm = fmaf(t, model.kernel_params[base_idx1 + 2] - model.kernel_params[base_idx0 + 2], model.kernel_params[base_idx0 + 2]);
+	*bm = fmaf(t, model.kernel_params[base_idx1 + 3] - model.kernel_params[base_idx0 + 3], model.kernel_params[base_idx0 + 3]);
+}
+
 
 __host__ IMRTDose::IMRTDose(CudaDose * h_dose) : CudaDose(h_dose) {}
 
 
-__global__ void termaKernel(IMRTDose * dose, IMRTBeam * beam, float * TERMAArray, float * ElectronArray){
+__global__ void termaKernel(IMRTDose * dose, IMRTBeam * beam, float * TERMAPrimaryArray, float * TERMAExtrafocalArray, float * ElectronArray){
 
 	PointIJK vox_ijk;
 	vox_ijk.k = threadIdx.x + (blockIdx.x * blockDim.x);
@@ -230,26 +313,49 @@ __global__ void termaKernel(IMRTDose * dose, IMRTBeam * beam, float * TERMAArray
 	float primary_transmission = beam->headTransmission(&vox_head_xyz, beam->model.primary_src_dist, beam->model.primary_src_size);
 	float scatter_transmission = beam->headTransmission(&vox_head_xyz, beam->model.scatter_src_dist, beam->model.scatter_src_size);
 	float wet = dose->WETArray[vox_index];
-	float terma = 0.f;
-	float electron = 0.f;
-	float transmission_ratio = fminf(1.00f, scatter_transmission / primary_transmission);
 
+	// ==============================================
+	// FASE 1: SEPARAÇÃO CORRETA DO TERMA
+	// ==============================================
+	// Separar componentes: PRIMARY (bloqueado pelo MLC) vs EXTRAFOCAL (sempre transmitido)
+	
+	float terma_primary = 0.f;
+	float terma_extrafocal = 0.f;
+	float electron = 0.f;
+
+	// Loop sobre espectro policromático
 	for(int i = 0; i < beam->model.n_spectral_energies; i++){
-		terma += (1.0f - transmission_ratio) * (beam->model.spectrum_primary_weights[i] * expf(-beam->model.spectrum_attenuation_coefficients[i] * wet * off_axis_softening) * sqr(beam->model.primary_src_dist / distance_to_primary_source)) +
-					transmission_ratio * beam->model.spectrum_scatter_weights[i] * expf(-beam->model.spectrum_attenuation_coefficients[i] * wet * off_axis_softening) * (beam->model.scatter_src_dist / distance_to_scatter_source);
+		// PRIMARY: fonte principal, atenuado pelo paciente, bloqueado pelo MLC
+		terma_primary += beam->model.spectrum_primary_weights[i] * 
+			expf(-beam->model.spectrum_attenuation_coefficients[i] * wet * off_axis_softening) * 
+			sqr(beam->model.primary_src_dist / distance_to_primary_source);
+		
+		// EXTRAFOCAL: fonte secundária (scatter head), sempre transmitido, não bloqueado pelo MLC
+		terma_extrafocal += beam->model.spectrum_scatter_weights[i] * 
+			expf(-beam->model.spectrum_attenuation_coefficients[i] * wet * off_axis_softening) * 
+			sqr(beam->model.scatter_src_dist / distance_to_scatter_source);
 	}
 
-	electron = fmaxf(0.0f, (expf(-beam->model.electron_attenuation * wet) - expf(-beam->model.electron_attenuation * beam->model.electron_fitted_dmax)) / (1.0f - expf(-beam->model.electron_attenuation * beam->model.electron_fitted_dmax)));
+	// Elétrons contaminantes (superficiais)
+	electron = fmaxf(0.0f, (expf(-beam->model.electron_attenuation * wet) - 
+		expf(-beam->model.electron_attenuation * beam->model.electron_fitted_dmax)) / 
+		(1.0f - expf(-beam->model.electron_attenuation * beam->model.electron_fitted_dmax)));
 
-	TERMAArray[vox_index] = off_axis_factor * ((1.0f - beam->model.scatter_src_weight) * primary_transmission * terma + beam->model.scatter_src_weight * scatter_transmission * terma);
-
-	ElectronArray[vox_index] = beam->model.electron_src_weight * (0.4f + (0.3f * transmission_ratio)) * electron * primary_transmission;
-
-    __syncthreads();
+	// CRÍTICO: Aplicar transmissão SOMENTE ao primário
+	// Primary: bloqueado pelo MLC (usa primary_transmission)
+	TERMAPrimaryArray[vox_index] = off_axis_factor * primary_transmission * terma_primary;
+	
+	// Extrafocal: NÃO é bloqueado pelo MLC (peso global apenas)
+	TERMAExtrafocalArray[vox_index] = off_axis_factor * beam->model.scatter_src_weight * terma_extrafocal;
+	
+	// Elétrons: modulados por transmissão e scatter_transmission
+	float transmission_ratio = fminf(1.00f, scatter_transmission / fmaxf(primary_transmission, 1e-6f));
+	ElectronArray[vox_index] = beam->model.electron_src_weight * 
+		(0.4f + (0.3f * transmission_ratio)) * electron * primary_transmission;
 
 }
 
-__global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATexture, Texture3D DensityTexture, float * ElectronArray){
+__global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMAPrimaryTexture, Texture3D TERMAExtrafocalTexture, Texture3D DensityTexture, float * ElectronArray){
 
 	PointIJK vox_ijk;
 	vox_ijk.k = threadIdx.x + (blockIdx.x * blockDim.x);
@@ -268,7 +374,9 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 	PointXYZ tex_img_xyz;
 	dose->pointXYZtoTextureXYZ(&vox_img_xyz, &tex_img_xyz, beam);
 
-	if (TERMATexture.sample(tex_img_xyz) <= 0.01f){
+	// Checar se há TERMA suficiente (primary + extrafocal)
+	float terma_check = TERMAPrimaryTexture.sample(tex_img_xyz) + TERMAExtrafocalTexture.sample(tex_img_xyz);
+	if (terma_check <= 0.01f){
 		dose->DoseArray[vox_index] = 0.0f;
 		return;
 	}
@@ -290,10 +398,14 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 	for(int i = 0; i < 6; i++){
 
 		float th = beam->model.kernel[i] * CUDART_PI_F / 180.0f;
-		float Am = beam->model.kernel[i + 6];
-		float am = beam->model.kernel[i + 12];
-		float Bm = beam->model.kernel[i + 18];
-		float bm = beam->model.kernel[i + 24];
+		
+		// FASE 2: Calcular z' (profundidade em WET) do voxel atual
+		float z_prime = dose->WETArray[vox_index] / 10.0f;  // Converter mm para cm
+		
+		// FASE 2: Interpolar parâmetros do kernel baseado em z'
+		float Am, am, Bm, bm;
+		beam->interpolateKernelParams(i, z_prime, &Am, &am, &Bm, &bm);
+		
 		float ray_length_init = beam->model.kernel[i + 30];
 
 		const auto sinth = sinf(th), costh = cosf(th);
@@ -321,18 +433,28 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 				ray_img_xyz.z = fmaf(tangent_img_xyz.z, ray_length * 10.0f, vox_img_xyz.z);
 
 				dose->pointXYZtoTextureXYZ(&ray_img_xyz, &tex_img_xyz, beam);
-				Ti = TERMATexture.sample(tex_img_xyz);
+				
+				// FASE 1: Somar primary + extrafocal separadamente
+				float Ti_primary = TERMAPrimaryTexture.sample(tex_img_xyz);
+				float Ti_extrafocal = TERMAExtrafocalTexture.sample(tex_img_xyz);
+				Ti = Ti_primary + Ti_extrafocal;
+				
 				Di = DensityTexture.sample(tex_img_xyz);
 
 				Di = fmaxf(Di, AIR_DENSITY) * sp;
-
-				const auto expon = expf(-am * Di);
-				Rp = Rp * expon + (Ti * sinth * (Am / (am * am)) * (1.0f - expon));
-				Rs = Rs * (1.0f - (bm * Di)) + (Ti * Di * sinth * (Bm / bm));
-
-				ray_length = ray_length - sp;
-
-			}
+				
+				// FASE 3: Lateral density scaling correto
+				// Densidade relativa para scaling lateral (ρ/ρ_água)
+			float rho_rel = Di / (1.0f * sp);  // Densidade relativa (água = 1.0 g/cc)
+			
+			// Primary component (exponencial estável)
+			const auto expon_p = expf(-am * Di);
+			Rp = Rp * expon_p + (Ti * sinth * (Am / (am * am)) * (1.0f - expon_p));
+			
+			// Scatter component (CORRIGIDO: exponencial estável, não linear)
+			// AAA/Eclipse descrevem scatter também como exponencial, apenas com parâmetros diferentes
+			const auto expon_s = expf(-bm * Di * rho_rel);
+			Rs = Rs * expon_s + (Ti * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s) * rho_rel);
 
 			dose_value += am * Rp + bm * Rs;
 
@@ -344,8 +466,6 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 	if(!isnan(dose_value) && (dose_value >= 0.0f)){
 		dose->DoseArray[vox_index] = beam->model.mu_cal * dose_value * beam->mu;
 	}
-
-	__syncthreads();
 
 }
 
@@ -359,7 +479,10 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 
 	DevicePointer<float> DoseArray(MemoryTag::Zeroed(), h_dose->num_voxels);
 	DevicePointer<float> WETArray(MemoryTag::Zeroed(), h_dose->num_voxels);
-	DevicePointer<float> TERMAArray(MemoryTag::Zeroed(), h_dose->num_voxels);
+	
+	// FASE 1: Arrays separados para TERMA primary e extrafocal
+	DevicePointer<float> TERMAPrimaryArray(MemoryTag::Zeroed(), h_dose->num_voxels);
+	DevicePointer<float> TERMAExtrafocalArray(MemoryTag::Zeroed(), h_dose->num_voxels);
 	DevicePointer<float> ElectronArray(MemoryTag::Zeroed(), h_dose->num_voxels);
 
 	d_dose.WETArray = WETArray.get();
@@ -382,8 +505,17 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	d_beam.model.spectrum_primary_weights = d_spectrum_primary_weights.get();
 	d_beam.model.spectrum_scatter_weights = d_spectrum_scatter_weights.get();
 	d_beam.model.kernel = d_kernel.get();
-
-	// CUDA_CHECK(cudaMemcpyToSymbol(g_kernel, h_kernel, 6 * 6 * sizeof(float)));
+	
+	// FASE 2: Copiar kernel z-dependente para device (se disponível)
+	if (h_beam->model.use_depth_dependent_kernel && h_beam->model.kernel_depths != nullptr) {
+		DevicePointer<float> d_kernel_depths(h_beam->model.kernel_depths, h_beam->model.n_kernel_depths);
+		DevicePointer<float> d_kernel_params(h_beam->model.kernel_params, h_beam->model.n_kernel_depths * 24);
+		d_beam.model.kernel_depths = d_kernel_depths.get();
+		d_beam.model.kernel_params = d_kernel_params.get();
+	} else {
+		d_beam.model.kernel_depths = nullptr;
+		d_beam.model.kernel_params = nullptr;
+	}
 
 	DevicePointer<IMRTBeam> d_beam_ptr(&d_beam);
 	DevicePointer<IMRTDose> d_dose_ptr(&d_dose);
@@ -393,12 +525,16 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 
 	auto DensityTexture = Texture3D::fromHostData(h_dose->DensityArray, h_dose->img_sz, cudaFilterModeLinear, AIR_DENSITY);
 
-    rayTraceKernel<<<dimGrid, dimBlock>>>(d_dose_ptr, d_beam_ptr, DensityTexture);
-    termaKernel<<<dimGrid, dimBlock>>>(d_dose_ptr, d_beam_ptr, TERMAArray, ElectronArray);
+    rayTraceKernel<<<dimGrid, dimBlock>>>(d_dose_ptr.get(), d_beam_ptr.get(), DensityTexture);
+    
+    // FASE 1: Chamar termaKernel com arrays separados
+    termaKernel<<<dimGrid, dimBlock>>>(d_dose_ptr.get(), d_beam_ptr.get(), TERMAPrimaryArray.get(), TERMAExtrafocalArray.get(), ElectronArray.get());
 
-	auto TERMATexture = Texture3D::fromDeviceData(TERMAArray, h_dose->img_sz, cudaFilterModeLinear);
+	// FASE 1: Criar texturas separadas
+	auto TERMAPrimaryTexture = Texture3D::fromDeviceData(TERMAPrimaryArray, h_dose->img_sz, cudaFilterModeLinear);
+	auto TERMAExtrafocalTexture = Texture3D::fromDeviceData(TERMAExtrafocalArray, h_dose->img_sz, cudaFilterModeLinear);
 
-	cccKernel<<<dimGrid, dimBlock>>>(d_dose_ptr, d_beam_ptr, TERMATexture, DensityTexture, ElectronArray);
+	cccKernel<<<dimGrid, dimBlock>>>(d_dose_ptr.get(), d_beam_ptr.get(), TERMAPrimaryTexture, TERMAExtrafocalTexture, DensityTexture, ElectronArray.get());
 
 	CUDA_CHECK(cudaMemcpy(h_dose->DoseArray, d_dose.DoseArray, d_dose.num_voxels * sizeof(float), cudaMemcpyDeviceToHost));
 

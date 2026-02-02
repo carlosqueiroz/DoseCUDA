@@ -44,6 +44,11 @@ class IMRTPhotonEnergy:
         self.mlc_offsets = None
         self.n_mlc_pairs = None
         self.kernel = None
+        
+        # FASE 2: Kernel dependente de profundidade
+        self.kernel_depths = None  # [0, 5, 10, 15, 20, 25, 30] cm
+        self.kernel_params = None  # [n_depths x 24] para 6 ângulos x 4 params
+        self.use_depth_dependent_kernel = False
 
     def validate_parameters(self):
         """Validate that all required parameters are set"""
@@ -237,6 +242,37 @@ class IMRTPlan(Plan):
         kernel_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel.csv"))
         kernel = pd.read_csv(kernel_path)
         beam_model.kernel = np.array(kernel.to_numpy(), dtype=np.single)
+        
+        # FASE 2: Tentar carregar kernel z-dependente (se existir)
+        kernel_zdep_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel_depth_dependent.csv"))
+        if os.path.exists(kernel_zdep_path):
+            kernel_zdep = pd.read_csv(kernel_zdep_path)
+            # Formato esperado: depth, angle_idx, Am, am, Bm, bm
+            # Reorganizar para [n_depths x 24]
+            depths = kernel_zdep["depth"].unique()
+            beam_model.kernel_depths = np.array(depths, dtype=np.single)
+            beam_model.n_kernel_depths = len(depths)
+            
+            # Criar array [n_depths x 6_angles x 4_params]
+            n_angles = 6
+            n_params = 4
+            kernel_params = np.zeros((len(depths), n_angles * n_params), dtype=np.single)
+            
+            for i, depth in enumerate(depths):
+                depth_data = kernel_zdep[kernel_zdep["depth"] == depth]
+                for j in range(n_angles):
+                    angle_data = depth_data[depth_data["angle_idx"] == j]
+                    if len(angle_data) > 0:
+                        kernel_params[i, j*4 + 0] = angle_data["Am"].values[0]
+                        kernel_params[i, j*4 + 1] = angle_data["am"].values[0]
+                        kernel_params[i, j*4 + 2] = angle_data["Bm"].values[0]
+                        kernel_params[i, j*4 + 3] = angle_data["bm"].values[0]
+            
+            beam_model.kernel_params = kernel_params.flatten()  # Linearizar para passar ao CUDA
+            beam_model.use_depth_dependent_kernel = True
+            print(f"✓ Loaded depth-dependent kernel for {folder_energy_label} ({len(depths)} depths)")
+        else:
+            beam_model.use_depth_dependent_kernel = False
 
         # Load machine geometry
         machine_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "machine_geometry.csv"))

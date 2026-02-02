@@ -223,6 +223,4 @@ __global__ void rayTraceKernel(CudaDose * dose, CudaBeam * beam, Texture3D Densi
 
 	dose->WETArray[vox_index] = wet_sum;
 
-    __syncthreads();
-
 }

@@ -435,6 +435,17 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 	 || !pyobject_getarray(model_instance, "kernel", 2, &kernel)) {
 		return NULL;
 	}
+	
+	// FASE 2: Carregar kernel z-dependente (opcional)
+	PyArrayObject *kernel_depths = nullptr, *kernel_params = nullptr;
+	bool use_depth_dependent_kernel = false;
+	if (PyObject_HasAttrString(model_instance, "use_depth_dependent_kernel")) {
+		pyobject_getbool(model_instance, "use_depth_dependent_kernel", &use_depth_dependent_kernel);
+		if (use_depth_dependent_kernel) {
+			pyobject_getarray(model_instance, "kernel_depths", 1, &kernel_depths);
+			pyobject_getarray(model_instance, "kernel_params", 1, &kernel_params);
+		}
+	}
 
 	// check volume data properties
 	PyArrayObject *density_array, 
@@ -448,9 +459,13 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 
 	// check control point data properties
 	PyArrayObject *iso_array, 
-		*mlc_array;
+		*mlc_array,
+		*xjaws_array,
+		*yjaws_array;
 	if (!pyobject_getarray(cp_instance, "iso", 1, &iso_array)
-	 || !pyobject_getarray(cp_instance, "mlc", 2, &mlc_array)) {
+	 || !pyobject_getarray(cp_instance, "mlc", 2, &mlc_array)
+	 || !pyobject_getarray(cp_instance, "xjaws", 1, &xjaws_array)
+	 || !pyobject_getarray(cp_instance, "yjaws", 1, &yjaws_array)) {
 		return NULL;
 	}
 
@@ -513,6 +528,18 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 		model.electron_fitted_dmax = electron_fitted_dmax;
 		model.jaw_transmission = jaw_transmission;
 		model.mlc_transmission = mlc_transmission;
+		
+		// FASE 2: Configurar kernel z-dependente
+		model.use_depth_dependent_kernel = use_depth_dependent_kernel;
+		if (use_depth_dependent_kernel && kernel_depths != nullptr && kernel_params != nullptr) {
+			model.kernel_depths = pyarray_as<float>(kernel_depths);
+			model.kernel_params = pyarray_as<float>(kernel_params);
+			model.n_kernel_depths = PyArray_DIM(kernel_depths, 0);
+		} else {
+			model.kernel_depths = nullptr;
+			model.kernel_params = nullptr;
+			model.n_kernel_depths = 0;
+		}
 
 		// dose object
 		IMRTDose dose_obj = IMRTDose(dims, voxel_sp);
@@ -532,15 +559,23 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 		beam_obj.n_mlc_pairs = n_mlc_pairs;
 		beam_obj.mlc = MLCPairArray.get();
 		beam_obj.mu = mu;
+	
+	// Pass jaws from Python to CUDA
+	float * xjaws = pyarray_as<float>(xjaws_array);
+	float * yjaws = pyarray_as<float>(yjaws_array);
+	beam_obj.xjaws[0] = xjaws[0];
+	beam_obj.xjaws[1] = xjaws[1];
+	beam_obj.yjaws[0] = yjaws[0];
+	beam_obj.yjaws[1] = yjaws[1];
 
-		// compute dose
-    	photon_dose_cuda(gpu_id, &dose_obj, &beam_obj);
+	// compute dose
+	photon_dose_cuda(gpu_id, &dose_obj, &beam_obj);
 
-		PyObject *return_dose = PyArray_SimpleNewFromData(3, PyArray_DIMS(density_array), PyArray_TYPE(density_array), DoseArray.release());
+	PyObject *return_dose = PyArray_SimpleNewFromData(3, PyArray_DIMS(density_array), PyArray_TYPE(density_array), DoseArray.release());
 
-		PyArray_ENABLEFLAGS((PyArrayObject*) return_dose, NPY_ARRAY_OWNDATA);
+	PyArray_ENABLEFLAGS((PyArrayObject*) return_dose, NPY_ARRAY_OWNDATA);
 
-		return return_dose;
+	return return_dose;
 
 	} catch (std::bad_alloc &) {
 
