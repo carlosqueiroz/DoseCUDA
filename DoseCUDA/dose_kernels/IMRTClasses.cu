@@ -344,11 +344,16 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 
 				Di = fmaxf(Di, AIR_DENSITY) * sp;
 
-				const auto expon = expf(-am * Di);
-				Rp = Rp * expon + (Ti * sinth * (Am / (am * am)) * (1.0f - expon));
-				Rs = Rs * (1.0f - (bm * Di)) + (Ti * Di * sinth * (Bm / bm));
+			// Densidade relativa (água = 1.0 g/cc)
+			float rho_rel = Di / (1.0f * sp);
 
-				ray_length = ray_length - sp;
+			// Primary: exponencial estável
+			const auto expon_p = expf(-am * Di);
+			Rp = Rp * expon_p + (Ti * sinth * (Am / (am * am)) * (1.0f - expon_p));
+			
+			// Scatter: CORRIGIDO para exponencial estável (não linear)
+			const auto expon_s = expf(-bm * Di * rho_rel);
+			Rs = Rs * expon_s + (Ti * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s) * rho_rel);
 
 			}
 
