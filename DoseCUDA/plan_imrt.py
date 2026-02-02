@@ -70,14 +70,17 @@ class IMRTPhotonEnergy:
         """
         Calcula o output factor baseado no campo equivalente.
         
+        Considera interseção de jaws e MLC para geometria real do campo.
         Valida área e perímetro para evitar divisões por zero ou valores inválidos.
         """
         import warnings
         
-        min_y = 10000.0
-        max_y = -10000.0
-        max_x_diff = 0.0
-        area = 0.0
+        # ========== ETAPA 1: Boundaries do MLC ==========
+        min_y_mlc = 10000.0
+        max_y_mlc = -10000.0
+        min_x_mlc = 10000.0
+        max_x_mlc = -10000.0
+        area_mlc = 0.0
         
         for i in range(cp.mlc.shape[0]):
             x1 = cp.mlc[i, 0]
@@ -85,29 +88,64 @@ class IMRTPhotonEnergy:
             y_offset = cp.mlc[i, 2]
             y_width = cp.mlc[i, 3]
 
-            area += (x2 - x1) * y_width
-
-            if (x2 - x1) > 3.0 and (x2 - x1) > max_x_diff:
-                max_x_diff = x2 - x1
-
+            # Acumular área do MLC (ignora gaps <3mm como antes)
             if (x2 - x1) > 3.0:
-                if (y_offset - y_width / 2.0) < min_y:
-                    min_y = (y_offset - y_width / 2.0)
-                if (y_offset + y_width / 2.0) > max_y:
-                    max_y = (y_offset + y_width / 2.0)
+                area_mlc += (x2 - x1) * y_width
+                
+                # Atualizar boundaries X do MLC
+                min_x_mlc = min(min_x_mlc, x1)
+                max_x_mlc = max(max_x_mlc, x2)
+                
+                # Atualizar boundaries Y do MLC
+                min_y_mlc = min(min_y_mlc, y_offset - y_width / 2.0)
+                max_y_mlc = max(max_y_mlc, y_offset + y_width / 2.0)
+        
+        # ========== ETAPA 2: Interseção com JAWS ==========
+        # Se jaws estão definidas, aplicar interseção
+        if hasattr(cp, 'xjaws') and hasattr(cp, 'yjaws'):
+            if cp.xjaws is not None and cp.yjaws is not None:
+                # Interseção: limitar MLC pelas jaws
+                min_x = max(min_x_mlc, cp.xjaws[0])
+                max_x = min(max_x_mlc, cp.xjaws[1])
+                min_y = max(min_y_mlc, cp.yjaws[0])
+                max_y = min(max_y_mlc, cp.yjaws[1])
+                
+                # Se jaws cortam completamente o MLC, campo efetivo pode ser menor
+                if max_x > min_x and max_y > min_y:
+                    # Recomputar área efetiva (aproximação retangular)
+                    area = (max_x - min_x) * (max_y - min_y)
+                    # Limitar pela área do MLC (não pode ser maior)
+                    area = min(area, area_mlc)
+                else:
+                    # Jaws bloqueiam completamente
+                    area = 0.0
+            else:
+                # Jaws None: usar MLC puro
+                min_x = min_x_mlc
+                max_x = max_x_mlc
+                min_y = min_y_mlc
+                max_y = max_y_mlc
+                area = area_mlc
+        else:
+            # Sem jaws: usar MLC puro (backward compatibility)
+            min_x = min_x_mlc
+            max_x = max_x_mlc
+            min_y = min_y_mlc
+            max_y = max_y_mlc
+            area = area_mlc
 
-        # Validar geometria do campo
+        # ========== ETAPA 3: Validação e Equivalent Square ==========
         eps = 1e-6
         
         if area < eps:
             warnings.warn(
                 "Output Factor: Área do campo muito pequena ou zero. "
                 "Retornando output factor mínimo (0.0). "
-                "Verifique se o segmento tem abertura válida no MLC."
+                "Verifique se o segmento tem abertura válida (MLC ou jaws podem estar fechados)."
             )
             return 0.0
         
-        perimeter = 2 * (max_y - min_y) + 2 * max_x_diff
+        perimeter = 2 * (max_y - min_y) + 2 * (max_x - min_x)
         
         if perimeter < eps:
             warnings.warn(
