@@ -1,0 +1,44 @@
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+/DoseCuda/
+
+# Python cache and artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.cache/
+pip-wheel-metadata/
+*.egg-info/
+
+# CMake build files and binaries
+/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+Makefile.cmake
+Makefile2
+install_manifest.txt
+
+# General build artifacts
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+
+# Ignore the entire opentps folder
+/opentps/
+
+# Local editor directories
+.vscode/
+.idea/
+tests/__pycache__/
+
+# Test patient data (removido dos commits)
+tests/test_patient_output/
+tests/PATIENT/

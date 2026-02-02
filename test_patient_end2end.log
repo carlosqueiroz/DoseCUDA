@@ -1,0 +1,287 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0 -- /home/rt/scripts/DoseCUDA/DoseCuda/bin/python
+cachedir: .pytest_cache
+rootdir: /home/rt/scripts/DoseCUDA
+configfile: pyproject.toml
+collecting ... collected 7 items
+
+tests/test_patient_end2end.py::test_1_discovery_and_selection 
+================================================================================
+PHASE 1: DICOM DISCOVERY
+================================================================================
+
+[DICOM Discovery] Scanning: /home/rt/scripts/DoseCUDA/tests/PATIENT/DICOM
+[DICOM Discovery] Scanned 136 files, found:
+  CT: 120 files in 1 series
+  RTPLAN: 1
+  RTSTRUCT: 1
+  RTDOSE: 1
+  Other: 13
+
+DicomCase:
+  CT series: 1 (120 files)
+  RTPLAN: 1
+  RTSTRUCT: 1
+  RTDOSE: 1
+  Other: 13
+
+================================================================================
+PHASE 2: AUTOMATIC SELECTION
+================================================================================
+
+[RTPLAN Selection] Only 1 RTPLAN found: E16B4D4F.dcm
+
+[RTDOSE Template] Only 1 RTDOSE found: 52D93134.dcm
+
+[RTSTRUCT] Using: F26021E9.dcm
+
+[CT Series] Only 1 CT series found: 120 slices
+
+================================================================================
+TEST 1: Discovery and Selection
+================================================================================
+
+✓ Discovery: 120 CT, 1 RTPLAN, 1 RTSTRUCT, 1 RTDOSE
+✓ Selected: RTPLAN=E16B4D4F.dcm, CT series=120 slices, RTDOSE=Yes
+PASSED
+tests/test_patient_end2end.py::test_2_ct_loading_and_anisotropy WARNING: In /tmp/SimpleITK-build/ITK-prefix/include/ITK-5.4/itkImageSeriesReader.hxx, line 478
+ImageSeriesReader (0x257afb10): Non uniform sampling or missing slices detected,  maximum nonuniformity:0.0991597
+
+
+================================================================================
+PHASE 3: CASE MATERIALIZATION
+================================================================================
+
+[Materialize] Creating case folder: /home/rt/scripts/DoseCUDA/tests/test_patient_output
+  Creating CT_ONLY with 120 slices...
+    ✓ CT files linked
+  ✓ RTPLAN copied: E16B4D4F.dcm
+  ✓ RTDOSE template copied: 52D93134.dcm
+  ✓ RTSTRUCT copied: F26021E9.dcm
+
+================================================================================
+TEST 2: CT Loading and Anisotropy Check
+================================================================================
+
+Loading CT from: /home/rt/scripts/DoseCUDA/tests/test_patient_output/CT_ONLY
+✓ CT loaded: shape=(120, 512, 512), spacing=[0.7031    0.7031    2.5008404] mm
+✓ CT is anisotropic (expected): [0.7031    0.7031    2.5008404] mm
+  Ratio z/x = 3.56
+PASSED
+tests/test_patient_end2end.py::test_3_isotropic_resampling WARNING: In /tmp/SimpleITK-build/ITK-prefix/include/ITK-5.4/itkImageSeriesReader.hxx, line 478
+ImageSeriesReader (0x257afb10): Non uniform sampling or missing slices detected,  maximum nonuniformity:0.0991597
+
+
+================================================================================
+TEST 3: Isotropic Resampling
+================================================================================
+
+Original CT: spacing=[0.7031    0.7031    2.5008404] mm, size=[120 512 512]
+Target: 2.5 mm isotropic
+FAILED
+tests/test_patient_end2end.py::test_4_gpu_dose_calculation 
+================================================================================
+PHASE 4: MACHINE MODEL INFERENCE
+================================================================================
+
+[Machine Model] Inferring from RTPLAN: E16B4D4F.dcm
+  TreatmentMachineName: '600CDsn1096'
+  ⚠ No matching heuristic for '600CDsn1096'
+  Using default: VarianTrueBeamHF
+ERROR
+tests/test_patient_end2end.py::test_5_save_numpy_and_nrrd ERROR
+tests/test_patient_end2end.py::test_6_resample_and_save_dicom_rtdose ERROR
+tests/test_patient_end2end.py::test_7_summary ERROR
+
+==================================== ERRORS ====================================
+________________ ERROR at setup of test_4_gpu_dose_calculation _________________
+
+selected_files = {'ct_series': [DicomFile(path=PosixPath('/home/rt/scripts/DoseCUDA/tests/PATIENT/DICOM/5317BAAC.dcm'), modality='CT', ...237241476.6', '2.16.840.1.114337.86854324933.16331.1237241468.6', '2.16.840.1.114337.86854324933.16331.1237241474.2'])}
+
+    @pytest.fixture(scope="module")
+    def machine_model(selected_files):
+        """
+        Fixture providing inferred machine model.
+        """
+        print("\n" + "=" * 80)
+        print("PHASE 4: MACHINE MODEL INFERENCE")
+        print("=" * 80)
+    
+        default_model = get_default_machine()
+        model = infer_machine_model(selected_files['rtplan'], default_model=default_model)
+    
+        # Validate model exists in lookuptables
+        lookuptable_path = Path(__file__).parent.parent / "lookuptables" / "photons" / model
+        if not lookuptable_path.exists():
+>           pytest.fail(
+                f"Machine model '{model}' not found in lookuptables/photons/.\n"
+                f"Expected path: {lookuptable_path}\n"
+                f"Available models: {list((lookuptable_path.parent).glob('*'))}"
+            )
+E           Failed: Machine model 'VarianTrueBeamHF' not found in lookuptables/photons/.
+E           Expected path: /home/rt/scripts/DoseCUDA/lookuptables/photons/VarianTrueBeamHF
+E           Available models: []
+
+tests/test_patient_end2end.py:213: Failed
+_________________ ERROR at setup of test_5_save_numpy_and_nrrd _________________
+
+selected_files = {'ct_series': [DicomFile(path=PosixPath('/home/rt/scripts/DoseCUDA/tests/PATIENT/DICOM/5317BAAC.dcm'), modality='CT', ...237241476.6', '2.16.840.1.114337.86854324933.16331.1237241468.6', '2.16.840.1.114337.86854324933.16331.1237241474.2'])}
+
+    @pytest.fixture(scope="module")
+    def machine_model(selected_files):
+        """
+        Fixture providing inferred machine model.
+        """
+        print("\n" + "=" * 80)
+        print("PHASE 4: MACHINE MODEL INFERENCE")
+        print("=" * 80)
+    
+        default_model = get_default_machine()
+        model = infer_machine_model(selected_files['rtplan'], default_model=default_model)
+    
+        # Validate model exists in lookuptables
+        lookuptable_path = Path(__file__).parent.parent / "lookuptables" / "photons" / model
+        if not lookuptable_path.exists():
+>           pytest.fail(
+                f"Machine model '{model}' not found in lookuptables/photons/.\n"
+                f"Expected path: {lookuptable_path}\n"
+                f"Available models: {list((lookuptable_path.parent).glob('*'))}"
+            )
+E           Failed: Machine model 'VarianTrueBeamHF' not found in lookuptables/photons/.
+E           Expected path: /home/rt/scripts/DoseCUDA/lookuptables/photons/VarianTrueBeamHF
+E           Available models: []
+
+tests/test_patient_end2end.py:213: Failed
+___________ ERROR at setup of test_6_resample_and_save_dicom_rtdose ____________
+
+selected_files = {'ct_series': [DicomFile(path=PosixPath('/home/rt/scripts/DoseCUDA/tests/PATIENT/DICOM/5317BAAC.dcm'), modality='CT', ...237241476.6', '2.16.840.1.114337.86854324933.16331.1237241468.6', '2.16.840.1.114337.86854324933.16331.1237241474.2'])}
+
+    @pytest.fixture(scope="module")
+    def machine_model(selected_files):
+        """
+        Fixture providing inferred machine model.
+        """
+        print("\n" + "=" * 80)
+        print("PHASE 4: MACHINE MODEL INFERENCE")
+        print("=" * 80)
+    
+        default_model = get_default_machine()
+        model = infer_machine_model(selected_files['rtplan'], default_model=default_model)
+    
+        # Validate model exists in lookuptables
+        lookuptable_path = Path(__file__).parent.parent / "lookuptables" / "photons" / model
+        if not lookuptable_path.exists():
+>           pytest.fail(
+                f"Machine model '{model}' not found in lookuptables/photons/.\n"
+                f"Expected path: {lookuptable_path}\n"
+                f"Available models: {list((lookuptable_path.parent).glob('*'))}"
+            )
+E           Failed: Machine model 'VarianTrueBeamHF' not found in lookuptables/photons/.
+E           Expected path: /home/rt/scripts/DoseCUDA/lookuptables/photons/VarianTrueBeamHF
+E           Available models: []
+
+tests/test_patient_end2end.py:213: Failed
+_______________________ ERROR at setup of test_7_summary _______________________
+
+selected_files = {'ct_series': [DicomFile(path=PosixPath('/home/rt/scripts/DoseCUDA/tests/PATIENT/DICOM/5317BAAC.dcm'), modality='CT', ...237241476.6', '2.16.840.1.114337.86854324933.16331.1237241468.6', '2.16.840.1.114337.86854324933.16331.1237241474.2'])}
+
+    @pytest.fixture(scope="module")
+    def machine_model(selected_files):
+        """
+        Fixture providing inferred machine model.
+        """
+        print("\n" + "=" * 80)
+        print("PHASE 4: MACHINE MODEL INFERENCE")
+        print("=" * 80)
+    
+        default_model = get_default_machine()
+        model = infer_machine_model(selected_files['rtplan'], default_model=default_model)
+    
+        # Validate model exists in lookuptables
+        lookuptable_path = Path(__file__).parent.parent / "lookuptables" / "photons" / model
+        if not lookuptable_path.exists():
+>           pytest.fail(
+                f"Machine model '{model}' not found in lookuptables/photons/.\n"
+                f"Expected path: {lookuptable_path}\n"
+                f"Available models: {list((lookuptable_path.parent).glob('*'))}"
+            )
+E           Failed: Machine model 'VarianTrueBeamHF' not found in lookuptables/photons/.
+E           Expected path: /home/rt/scripts/DoseCUDA/lookuptables/photons/VarianTrueBeamHF
+E           Available models: []
+
+tests/test_patient_end2end.py:213: Failed
+=================================== FAILURES ===================================
+_________________________ test_3_isotropic_resampling __________________________
+
+materialized_case = {'ct_dir': PosixPath('/home/rt/scripts/DoseCUDA/tests/test_patient_output/CT_ONLY'), 'rtdose': PosixPath('/home/rt/scr...patient_output/RTPLAN.dcm'), 'rtstruct': PosixPath('/home/rt/scripts/DoseCUDA/tests/test_patient_output/RTSTRUCT.dcm')}
+
+    def test_3_isotropic_resampling(materialized_case):
+        """
+        Test 3: Resample anisotropic CT to isotropic spacing for dose calculation.
+        """
+        print("\n" + "=" * 80)
+        print("TEST 3: Isotropic Resampling")
+        print("=" * 80)
+    
+        target_spacing = get_iso_spacing_mm()
+    
+        dg = IMRTDoseGrid()
+        dg.loadCTDCM(str(materialized_case['ct_dir']))
+    
+        original_spacing = dg.spacing.copy()
+        original_size = dg.size.copy()
+    
+        print(f"\nOriginal CT: spacing={original_spacing} mm, size={original_size}")
+        print(f"Target: {target_spacing} mm isotropic")
+    
+        # Resample to isotropic
+>       dg.resampleCTfromSpacing(target_spacing)
+
+tests/test_patient_end2end.py:308: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+DoseCUDA/plan.py:222: in resampleCTfromSpacing
+    HU_img.SetOrigin(self.origin)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <SimpleITK.SimpleITK.Image; proxy of <Swig Object of type 'itk::simple::Image *' at 0x75f8023297a0> >
+origin = array([-179.9936, -179.9936, -167.8   ], dtype=float32)
+
+    def SetOrigin(self, origin):
+        r"""SetOrigin(Image self, VectorDouble origin)"""
+>       return _SimpleITK.Image_SetOrigin(self, origin)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: in method 'Image_SetOrigin', argument 2 of type 'std::vector< double,std::allocator< double > > const &'
+
+DoseCuda/lib/python3.12/site-packages/SimpleITK/SimpleITK.py:3242: TypeError
+=============================== warnings summary ===============================
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+
+DoseCUDA/plan_impt.py:11
+  /home/rt/scripts/DoseCUDA/DoseCUDA/plan_impt.py:11: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+    import pkg_resources
+
+tests/test_patient_end2end.py::test_2_ct_loading_and_anisotropy
+tests/test_patient_end2end.py::test_3_isotropic_resampling
+  /home/rt/scripts/DoseCUDA/DoseCUDA/plan.py:148: UserWarning: HU fora de range plausível: min=-1261, max=7948. Verifique se RescaleSlope/Intercept estão corretos.
+    warnings.warn(
+
+tests/test_patient_end2end.py::test_2_ct_loading_and_anisotropy
+tests/test_patient_end2end.py::test_3_isotropic_resampling
+  /home/rt/scripts/DoseCUDA/DoseCUDA/plan.py:184: UserWarning: Slice spacing inconsistente: spacing médio = 2.501 mm, desvio máximo = 0.099 mm (3.97%). Isso pode indicar slices faltando ou espaçamento irregular.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_patient_end2end.py::test_3_isotropic_resampling - TypeError...
+ERROR tests/test_patient_end2end.py::test_4_gpu_dose_calculation - Failed: Ma...
+ERROR tests/test_patient_end2end.py::test_5_save_numpy_and_nrrd - Failed: Mac...
+ERROR tests/test_patient_end2end.py::test_6_resample_and_save_dicom_rtdose - ...
+ERROR tests/test_patient_end2end.py::test_7_summary - Failed: Machine model '...
+============== 1 failed, 2 passed, 8 warnings, 4 errors in 2.46s ===============
