@@ -414,16 +414,16 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 					Ti_eff = Ti;
 				}
 
-				// Densidade relativa (água = 1.0 g/cc)
-				float rho_rel = Di / (1.0f * sp);
-
 				// Primary: exponencial estável
 				const auto expon_p = expf(-am * Di);
 				Rp = Rp * expon_p + (Ti_eff * sinth * (Am / (am * am)) * (1.0f - expon_p));
 				
-				// Scatter: CORRIGIDO para exponencial estável (não linear)
-				const auto expon_s = expf(-bm * Di * rho_rel);
-				Rs = Rs * expon_s + (Ti_eff * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s) * rho_rel);
+				// Scatter: usar distância radiológica uma única vez
+				const auto expon_s = expf(-bm * Di);
+				Rs = Rs * expon_s + (Ti_eff * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s));
+
+				// Avança o feixe; sem isso o loop não termina
+				ray_length -= sp;
 
 			}
 
@@ -468,6 +468,11 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	DevicePointer<float> d_kernel_depths;
 	DevicePointer<float> d_kernel_params;
 
+	// Default nulls for optional kernel data
+	d_beam.model.kernel_weights = nullptr;
+	d_beam.model.kernel_depths = nullptr;
+	d_beam.model.kernel_params = nullptr;
+
 	if (h_beam->model.kernel_weights != nullptr) {
 		d_kernel_weights = DevicePointer<float>(h_beam->model.kernel_weights, 6);
 		d_beam.model.kernel_weights = d_kernel_weights.get();
@@ -491,10 +496,6 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	d_beam.model.kernel_len = h_beam->model.kernel_len;
 	d_beam.model.use_depth_dependent_kernel = h_beam->model.use_depth_dependent_kernel;
 	d_beam.model.n_kernel_depths = h_beam->model.n_kernel_depths;
-	// Default nulls for optional kernel data
-	d_beam.model.kernel_weights = nullptr;
-	d_beam.model.kernel_depths = nullptr;
-	d_beam.model.kernel_params = nullptr;
 
 	// CUDA_CHECK(cudaMemcpyToSymbol(g_kernel, h_kernel, 6 * 6 * sizeof(float)));
 
