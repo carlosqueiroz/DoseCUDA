@@ -22,7 +22,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from DoseCUDA.plan import DoseGrid
 from DoseCUDA.plan_imrt import IMRTPlan, IMRTDoseGrid
-from DoseCUDA.plan_impt import IMPTPlan, IMPTDoseGrid
 from DoseCUDA import rtstruct, dvh
 
 
@@ -284,35 +283,6 @@ def clinical_secondary_check_imrt(
     results['report'] = report
     
     return results
-
-
-def clinical_secondary_check_impt(
-    ct_path: str,
-    rtplan_path: str,
-    rtstruct_path: str,
-    rtdose_ref_path: str,
-    roi_names: list,
-    machine_name: str = "IBA_Proteus_Plus",
-    gpu_id: int = 0,
-    tolerance_abs: float = 0.5,
-    tolerance_rel: float = 0.03,
-):
-    """
-    Complete clinical secondary check for IMPT plan.
-    
-    Similar to IMRT version but uses IMPTPlan and IMPTDoseGrid.
-    """
-    print("\n" + "="*70)
-    print("CLINICAL SECONDARY DOSE CHECK - IMPT")
-    print("="*70)
-    
-    # Implementation similar to IMRT but with IMPT classes
-    # (Left as exercise - same structure as above but using IMPTPlan/IMPTDoseGrid)
-    
-    raise NotImplementedError(
-        "IMPT secondary check implementation follows same pattern as IMRT. "
-        "Use IMPTPlan and IMPTDoseGrid instead of IMRT versions."
-    )
 
 
 def main():

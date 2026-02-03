@@ -39,7 +39,10 @@ install_manifest.txt
 .idea/
 tests/__pycache__/
 rt
-!rt/connect/storage/app/maquinas/44
 # Test patient data (removido dos commits)
 tests/test_patient_output/
 tests/PATIENT/
+*.log
+plastimatch/
+rt/
+RTTB/

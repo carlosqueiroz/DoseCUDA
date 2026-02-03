@@ -200,20 +200,20 @@ class DoseGrid:
 
     def resampleCT(self, new_spacing, new_size, new_origin):
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(tuple(float(x) for x in self.origin))
+        HU_img.SetSpacing(tuple(float(x) for x in self.spacing))
 
         rf = sitk.ResampleImageFilter()
-        rf.SetOutputOrigin(new_origin)
-        rf.SetOutputSpacing(new_spacing)
-        rf.SetSize(new_size)
+        rf.SetOutputOrigin(tuple(float(x) for x in new_origin))
+        rf.SetOutputSpacing(tuple(float(x) for x in new_spacing))
+        rf.SetSize(tuple(int(x) for x in new_size))
         rf.SetDefaultPixelValue(-1000)
 
         HU_resampled = rf.Execute(HU_img)
         self.HU = np.array(sitk.GetArrayFromImage(HU_resampled), dtype=np.single)
 
-        self.origin = new_origin
-        self.spacing = new_spacing
+        self.origin = np.array(new_origin, dtype=np.single)
+        self.spacing = np.array(new_spacing, dtype=np.single)
         self.size = np.array(self.HU.shape)
 
     def resampleCTfromSpacing(self, spacing):
@@ -246,12 +246,12 @@ class DoseGrid:
         ref_origin = np.array(ref_dose.ImagePositionPatient)
 
         ref_dose_img = sitk.GetImageFromArray(ref_dose.pixel_array)
-        ref_dose_img.SetOrigin(ref_origin)
-        ref_dose_img.SetSpacing(ref_spacing)
+        ref_dose_img.SetOrigin(tuple(float(x) for x in ref_origin))
+        ref_dose_img.SetSpacing(tuple(float(x) for x in ref_spacing))
 
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(tuple(float(x) for x in self.origin))
+        HU_img.SetSpacing(tuple(float(x) for x in self.spacing))
 
         rf = sitk.ResampleImageFilter()
         rf.SetReferenceImage(ref_dose_img)
@@ -446,8 +446,8 @@ class DoseGrid:
 
         fw = sitk.ImageFileWriter()
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(tuple(float(x) for x in self.origin))
+        HU_img.SetSpacing(tuple(float(x) for x in self.spacing))
 
         fw.SetFileName(ct_path)
         fw.Execute(HU_img)
@@ -457,8 +457,8 @@ class DoseGrid:
             raise Exception("CT path must have .nii.gz extension")
 
         HU_img = sitk.GetImageFromArray(self.HU)
-        HU_img.SetOrigin(self.origin)
-        HU_img.SetSpacing(self.spacing)
+        HU_img.SetOrigin(tuple(float(x) for x in self.origin))
+        HU_img.SetSpacing(tuple(float(x) for x in self.spacing))
 
         fw = sitk.ImageFileWriter()
         fw.SetFileName(ct_path)

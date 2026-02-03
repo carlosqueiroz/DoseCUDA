@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoseCUDA Secondary Check Report",
+  "description": "JSON schema for DoseCUDA secondary dose check reports",
+  "type": "object",
+  "required": ["schema_version", "patient_id", "plan_name", "timestamp", "overall_status"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Report schema version"
+    },
+    "patient_id": {
+      "type": "string",
+      "description": "Patient identifier"
+    },
+    "plan_name": {
+      "type": "string",
+      "description": "Treatment plan name"
+    },
+    "plan_uid": {
+      "type": "string",
+      "description": "DICOM SOPInstanceUID of the RTPLAN"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of report generation"
+    },
+    "dosecuda_version": {
+      "type": "string",
+      "description": "DoseCUDA software version"
+    },
+    "criteria": {
+      "type": "object",
+      "description": "Pass/fail criteria used for evaluation",
+      "properties": {
+        "gamma_3_3_pass_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum pass rate for 3%/3mm gamma"
+        },
+        "gamma_2_2_pass_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum pass rate for 2%/2mm gamma"
+        },
+        "gamma_dose_threshold": {
+          "type": "number",
+          "description": "Dose threshold for gamma evaluation (percent of max)"
+        },
+        "gamma_global_mode": {
+          "type": "boolean",
+          "description": "True for global dose normalization, false for local"
+        },
+        "target_d95_tolerance_rel": {
+          "type": "number",
+          "description": "Relative tolerance for target D95 (fraction)"
+        },
+        "target_dmean_tolerance_rel": {
+          "type": "number",
+          "description": "Relative tolerance for target Dmean (fraction)"
+        },
+        "oar_dmean_tolerance_abs": {
+          "type": "number",
+          "description": "Absolute tolerance for OAR Dmean (Gy)"
+        },
+        "oar_dmax_tolerance_abs": {
+          "type": "number",
+          "description": "Absolute tolerance for OAR Dmax (Gy)"
+        },
+        "mu_equiv_tolerance": {
+          "type": "number",
+          "description": "Tolerance for MU equivalent ratio (fraction)"
+        }
+      }
+    },
+    "gamma_results": {
+      "type": "object",
+      "description": "Gamma analysis results by criteria label",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["pass_rate", "n_evaluated", "status"],
+        "properties": {
+          "criteria_label": {
+            "type": "string",
+            "description": "Human-readable criteria label (e.g., '3%/3mm (global)')"
+          },
+          "pass_rate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Fraction of voxels with gamma <= 1"
+          },
+          "mean_gamma": {
+            "type": "number",
+            "description": "Mean gamma value"
+          },
+          "gamma_p95": {
+            "type": "number",
+            "description": "95th percentile gamma value"
+          },
+          "n_evaluated": {
+            "type": "integer",
+            "description": "Number of voxels evaluated"
+          },
+          "n_passed": {
+            "type": "integer",
+            "description": "Number of voxels with gamma <= 1"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["PASS", "FAIL"],
+            "description": "Pass/fail status based on criteria"
+          }
+        }
+      }
+    },
+    "dvh_results": {
+      "type": "object",
+      "description": "DVH comparison results by ROI name",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["roi_type", "overall_status"],
+        "properties": {
+          "roi_type": {
+            "type": "string",
+            "enum": ["TARGET", "OAR"],
+            "description": "ROI classification"
+          },
+          "volume_cc": {
+            "type": "number",
+            "description": "ROI volume in cubic centimeters"
+          },
+          "metrics": {
+            "type": "object",
+            "description": "DVH metrics comparison",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "calculated": {
+                  "type": "number",
+                  "description": "Calculated value"
+                },
+                "reference": {
+                  "type": "number",
+                  "description": "Reference value"
+                },
+                "diff_abs": {
+                  "type": "number",
+                  "description": "Absolute difference (calculated - reference)"
+                },
+                "diff_rel": {
+                  "type": ["number", "null"],
+                  "description": "Relative difference as fraction"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["PASS", "FAIL", "N/A"],
+                  "description": "Pass/fail status for this metric"
+                }
+              }
+            }
+          },
+          "overall_status": {
+            "type": "string",
+            "enum": ["PASS", "FAIL"],
+            "description": "Overall status for this ROI"
+          }
+        }
+      }
+    },
+    "mu_sanity": {
+      "type": ["object", "null"],
+      "description": "MU sanity check results (null if not performed)",
+      "properties": {
+        "isocenter_mm": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3,
+          "description": "Isocenter position [x, y, z] in mm"
+        },
+        "dose_calc_gy": {
+          "type": "number",
+          "description": "Calculated dose at isocenter (Gy)"
+        },
+        "dose_ref_gy": {
+          "type": "number",
+          "description": "Reference dose at isocenter (Gy)"
+        },
+        "total_mu": {
+          "type": "number",
+          "description": "Total plan MU"
+        },
+        "gy_per_mu_calc": {
+          "type": "number",
+          "description": "Calculated Gy/MU at isocenter"
+        },
+        "gy_per_mu_ref": {
+          "type": "number",
+          "description": "Reference Gy/MU at isocenter"
+        },
+        "mu_equiv_ratio": {
+          "type": "number",
+          "description": "Ratio of Gy/MU (calc/ref)"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["INFO", "WARN", "FAIL"],
+          "description": "Status level"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable status message"
+        }
+      }
+    },
+    "overall_status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "ERROR"],
+      "description": "Overall secondary check status"
+    },
+    "failure_reasons": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "List of reasons for failures (empty if PASS)"
+    }
+  }
+}

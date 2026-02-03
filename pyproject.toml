@@ -8,20 +8,15 @@ version = "1.0"
 description = "GPU-based radiation dose calculation using CUDA."
 readme = "README.md"
 
-authors = [
-    {name = "Tom Hrinivich", email = "DoseCUDA@gmail.com"},
-    {name = "Calin Reamy", email = "DoseCUDA@gmail.com"},
-    {name = "Mahasweta Bhattacharya", email = "DoseCUDA@gmail.com"}
-]
-
 dependencies = [
     "numpy < 2",
     "pydicom",
     "SimpleITK",
-    "pandas"
+    "pandas",
+    "matplotlib",
 ]
 
-keywords = ["radiation", "oncology", "medical", "proton", "cuda"]
+keywords = ["radiation", "oncology", "medical", "cuda"]
 
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
@@ -31,7 +26,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Natural Language :: English",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: C++",
     "Programming Language :: Python",

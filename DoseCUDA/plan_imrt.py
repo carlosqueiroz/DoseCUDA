@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pydicom as pyd
 import pkg_resources
+import warnings
 try:
     import dose_kernels
 except ModuleNotFoundError:
@@ -405,7 +406,7 @@ class IMRTDoseGrid(DoseGrid):
         self.Density = self.DensityFromHU(plan.machine_name, calibration_name=ct_calibration_name)
 
         if self.spacing[0] != self.spacing[1] or self.spacing[0] != self.spacing[2]:
-            raise Exception("Spacing must be isotropic for IMPT dose calculation - consider resampling CT")
+            raise Exception("Spacing must be isotropic for dose calculation - consider resampling CT")
         
         density_object = VolumeObject()
         density_object.voxel_data = np.array(self.Density, dtype=np.single)
@@ -528,20 +529,31 @@ class IMRTPlan(Plan):
             beam_model.n_mlc_pairs = len(beam_model.mlc_index)
             print(f"⚠ MLC geometry carregada do CSV (fallback): {beam_model.n_mlc_pairs} pares")
 
-        # Load kernel
+        # Load kernel (CUDA expects column-grouped layout: theta[0..5], Am[0..5], am[0..5], Bm[0..5], bm[0..5], ray_length[0..5])
         kernel_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel.csv"))
         kernel = pd.read_csv(kernel_path)
-        # Expect columns: theta, Am, am, Bm, bm, ray_length, weight
+        # Normalize column names (strip spaces/BOM)
+        kernel.columns = [str(c).strip() for c in kernel.columns]
         required_cols = ["theta", "Am", "am", "Bm", "bm", "ray_length"]
-        for col in required_cols:
-            if col not in kernel.columns:
-                raise ValueError(f"kernel.csv missing column '{col}'")
-            beam_model.kernel = np.array(kernel[required_cols].to_numpy().flatten(), dtype=np.single)
-            beam_model.kernel_len = beam_model.kernel.size
-            if "weight" in kernel.columns:
-                beam_model.kernel_weights = np.array(kernel["weight"].to_numpy(), dtype=np.single)
-            else:
-                beam_model.kernel_weights = None
+        missing = [c for c in required_cols if c not in kernel.columns]
+        if missing:
+            raise ValueError(f"kernel.csv missing column(s): {', '.join(missing)}")
+
+        # Build column-grouped vector to match CUDA indexing
+        theta = kernel["theta"].to_numpy(dtype=np.single)
+        Am = kernel["Am"].to_numpy(dtype=np.single)
+        am = kernel["am"].to_numpy(dtype=np.single)
+        Bm = kernel["Bm"].to_numpy(dtype=np.single)
+        bm = kernel["bm"].to_numpy(dtype=np.single)
+        ray_length = kernel["ray_length"].to_numpy(dtype=np.single)
+
+        beam_model.kernel = np.concatenate([theta, Am, am, Bm, bm, ray_length]).astype(np.single)
+        beam_model.kernel_len = beam_model.kernel.size
+
+        if "weight" in kernel.columns:
+            beam_model.kernel_weights = np.array(kernel["weight"].to_numpy(), dtype=np.single)
+        else:
+            beam_model.kernel_weights = None
         # heterogeneity smoothing (optional)
         beam_model.heterogeneity_alpha = 0.0  # default off; overridden by beam_parameters.csv
         

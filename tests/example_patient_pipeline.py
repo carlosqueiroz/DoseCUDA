@@ -277,7 +277,7 @@ def main():
     print("\nFor real clinical use:")
     print("  1. Replace createCubePhantom() with grid.loadCTDCM('path/to/ct')")
     print("  2. Replace synthetic ROI with rtstruct.read_rtstruct('RTSTRUCT.dcm')")
-    print("  3. Calculate dose using plan.computeIMRTPlan() or plan.computeIMPTPlan()")
+    print("  3. Calculate dose using plan.computeIMRTPlan()")
     print("  4. Load reference RTDOSE for comparison")
     print("")
 

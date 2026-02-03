@@ -1,5 +1,6 @@
 #include "./IMRTClasses.cuh"
 #include "MemoryClasses.h"
+#include <memory>
 
 
 __host__ __device__ float interp(float x, const float * xd, const float * yd, const int n){
@@ -457,9 +458,9 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	DevicePointer<float> d_spectrum_primary_weights(h_beam->model.spectrum_primary_weights, h_beam->model.n_spectral_energies);
 	DevicePointer<float> d_spectrum_scatter_weights(h_beam->model.spectrum_scatter_weights, h_beam->model.n_spectral_energies);
 	DevicePointer<float> d_kernel(h_beam->model.kernel, h_beam->model.kernel_len);
-	DevicePointer<float> d_kernel_weights;
-	DevicePointer<float> d_kernel_depths;
-	DevicePointer<float> d_kernel_params;
+	std::unique_ptr<DevicePointer<float>> d_kernel_weights;
+	std::unique_ptr<DevicePointer<float>> d_kernel_depths;
+	std::unique_ptr<DevicePointer<float>> d_kernel_params;
 
 	// Default nulls for optional kernel data
 	d_beam.model.kernel_weights = nullptr;
@@ -467,15 +468,15 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	d_beam.model.kernel_params = nullptr;
 
 	if (h_beam->model.kernel_weights != nullptr) {
-		d_kernel_weights = DevicePointer<float>(h_beam->model.kernel_weights, 6);
-		d_beam.model.kernel_weights = d_kernel_weights.get();
+		d_kernel_weights = std::make_unique<DevicePointer<float>>(h_beam->model.kernel_weights, 6);
+		d_beam.model.kernel_weights = d_kernel_weights->get();
 	}
 	if (h_beam->model.use_depth_dependent_kernel && h_beam->model.kernel_depths != nullptr && h_beam->model.kernel_params != nullptr) {
-		d_kernel_depths = DevicePointer<float>(h_beam->model.kernel_depths, h_beam->model.n_kernel_depths);
+		d_kernel_depths = std::make_unique<DevicePointer<float>>(h_beam->model.kernel_depths, h_beam->model.n_kernel_depths);
 		// kernel_params length = n_depths * 24 (6 angles * 4 params)
-		d_kernel_params = DevicePointer<float>(h_beam->model.kernel_params, h_beam->model.n_kernel_depths * 24);
-		d_beam.model.kernel_depths = d_kernel_depths.get();
-		d_beam.model.kernel_params = d_kernel_params.get();
+		d_kernel_params = std::make_unique<DevicePointer<float>>(h_beam->model.kernel_params, h_beam->model.n_kernel_depths * 24);
+		d_beam.model.kernel_depths = d_kernel_depths->get();
+		d_beam.model.kernel_params = d_kernel_params->get();
 	}
 
 	d_beam.mlc = MLCPairArray.get();

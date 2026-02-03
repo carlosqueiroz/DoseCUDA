@@ -1,152 +1,306 @@
 # DoseCUDA
+# DoseCUDA — GPU Collapsed-Cone Convolution (CCC) para Linux
 
-**NOT FOR CLINICAL USE**
+**Resumo:** DoseCUDA é um motor de cálculo de dose fotônica baseado em CUDA (NVIDIA) que implementa o algoritmo Collapsed-Cone Convolution/Superposition (TERMA + correções de heterogeneidade). Este repositório contém o núcleo CUDA em `DoseCUDA/dose_kernels` e a camada Python que prepara entradas, carrega modelos e exporta resultados.
 
-**License**
-This project is licensed under the GPL-2.0 License - see the [LICENSE](LICENSE) file for details.
+**Objetivo deste README:** fornecer instruções completas e detalhadas para compilar, instalar e executar DoseCUDA em Linux com GPU NVIDIA, explicar a API mínima necessária e listar checagens e soluções para problemas comuns.
 
-**To use, please cite [our paper](http://doi.org/10.1002/acm2.70093):**
-Bhattacharya M, Reamy C, Li H, Lee J, Hrinivich WT. A Python package for fast GPU‐based proton pencil beam dose calculation. Journal of Applied Clinical Medical Physics. 2025 Apr 11:e70093.
+**Importante:** o motor atual requer GPUs NVIDIA compatíveis com o CUDA Toolkit; não há suporte CUDA para AMD/Intel no código atualmente.
 
-**DoseCUDA** is a Python package enabling GPU-based radiation dose calculation for research, development, and education. The package currently supports photon dose calculation using a collapsed cone convolution superposition algorithm and proton dose calculation using a double-Gaussian pencil beam algorithm. The default photon beam model corresponds to the 6 MV energy of a Varian Truebeam linear accelerator and the default proton beam model corresponds to a Hitachi Probeat synchrotron-based PBS delivery system with 98 discrete energies.
+**Principais arquivos e locais:**
+- **`DoseCUDA/dose_kernels/dosemodule.cu`**: binding Python → CUDA, exporta `photon_dose_cuda(model, volume, cp, gpu_id)`.
+- **`DoseCUDA/dose_kernels/IMRTClasses.cu`**, **`CudaClasses.cu`**, **`TextureClasses.cu`**: implementação CUDA (ray-trace, TERMA, CCC kernel).
+- **`setup.py`** / **`pyproject.toml`**: configuração de build via scikit-build (CMake) e `pip`.
+- **`DoseCUDA/plan_imrt.py`**, **`DoseCUDA/plan.py`**, **`DoseCUDA/grid_utils.py`**, **`DoseCUDA/rtstruct.py`**: API Python para montar grids, resample CT, rasterizar RTSTRUCT e orquestrar cálculo.
 
-# Quickstart Guide
+**Versão mínima de ferramentas**
+- **CMake** ≥ 3.15
+- **Python** 3.6+ (suporta 3.12 no ambiente presente)
+- **CUDA Toolkit**: use a versão compatível com seu driver e GPU (ex.: 11.x ou 12.x conforme seu stack). Testado com toolkits recentes — verifique `nvcc --version`.
 
-## Prerequisites
-Before installing DoseCUDA, ensure you have the following dependencies installed:
-- **Python 3.6+**
-- **CMake 3.15+**
-- **CUDA Toolkit** (Ensure you have a compatible version for your GPU)
-- **Git** (for cloning the repository)
+**Recomendações de sistema**
+- Driver NVIDIA instalado e funcionando (ver `nvidia-smi`).
+- NVCC (CUDA compiler) disponível no PATH.
+- Compilador host compatível com `nvcc` (GCC ou `clang++` apropriado). Se necessário, use `CUDAHOSTCXX` (ex.: `export CUDAHOSTCXX=/usr/bin/clang++`).
 
-Ensure that your GPU and CUDA drivers are properly set up before proceeding.
+**Passo a passo: preparar ambiente Linux (exemplo Ubuntu/Debian)**
 
-## Installation on Linux
+1) Verificações prévias (GPU / CUDA / compilador):
 
-Linux builds were tested on Ubuntu 20.04.4 LTS and Debian 12.
+```bash
+# verifique driver e GPUs
+nvidia-smi
 
-1. **Install Python** (if not already installed):
-   ```
-   sudo apt update
-   sudo apt install python3 python3-pip
-   ```
-   
-2. **(Optional but recommended)**: Create a virtual environment to isolate DoseCUDA and its dependencies:
-   ```
-   python3 -m venv dosecuda-env
-   source dosecuda-env/bin/activate
-   ```
+# versão do nvcc
+nvcc --version
 
-3. **Clone the DoseCUDA repository**:
-   ```
-   git clone https://github.com/jhu-som-radiation-oncology/DoseCUDA
-   cd DoseCUDA
-   ```
+# versão do compilador C++ (gcc/clang)
+gcc --version || clang --version
+```
 
-4. **Install using pip**:
-   ```
-   python -m pip install .
-   ```
-   You may have to [override the host compiler](#additional-notes-linux) if yours is not supported.
+2) Recomenda-se um virtualenv isolado (opcional, mas útil):
 
-5. **Verify the installation**:
-   Run the test script to verify that DoseCUDA is installed correctly and working:
-   ```
-   python tests/test_phantom_impt.py
-   ```
-   or
-   ```
-   python tests/test_phantom_imrt.py
-   ```
+```bash
+python3 -m venv dosecuda-env
+source dosecuda-env/bin/activate
+python -m pip install -U pip setuptools wheel
+```
 
-   If everything is installed correctly, you should see the dose calculation output in your terminal and files saved into `./test_phantom_output`.
+3) Dependências Python (instalar antes do build):
 
+```bash
+python -m pip install numpy pandas pydicom SimpleITK matplotlib scikit-build-core
+```
 
-6. **Deactivating the virtual environment** (if used):
-   After using the package, you can deactivate the virtual environment:
-   ```
-   deactivate
-   ```
+4) Compilar e instalar o pacote (CMake + CUDA via scikit-build):
 
-## Additional Notes (Linux):
-- **CUDA version**: Ensure that your CUDA version is compatible with your GPU and the CUDA Toolkit installed on your system.
-- **Virtual environments**: Virtual environments help avoid conflicts between dependencies required by DoseCUDA and other Python projects you may have on your machine.
-- **NVCC host compiler**: You can supply a host compiler override to pip by setting the environment variable `CUDAHOSTCXX` to the compiler command (e.g. `CUDAHOSTCXX=clang++`). Use this if your system's default is not supported.
+```bash
+# Caso nvcc exija um host compiler específico
+export CUDAHOSTCXX=/usr/bin/g++
 
-## Installation on Windows
+# Instalação (build + instalação via pip)
+python -m pip install .
+```
 
-Windows builds have only been tested with Visual Studio 2022 on Windows 11 Enterprise Edition.
+Observações:
+- O build usa `scikit-build` que invoca CMake nos sources em `DoseCUDA/dose_kernels` (veja `setup.py` e `pyproject.toml`).
+- Se encontrar erros do `nvcc` referentes ao host compiler, a variável `CUDAHOSTCXX` costuma resolver.
 
-1. **Install Python** (if not already installed):
-   - Download Python from the [official website](https://www.python.org/downloads/) and install it.
-   - Make sure to check the option "Add Python to PATH" during the installation.
+5) Teste rápido (phantom/example)
 
-2. **Install MSVC**
-   - Download Microsoft's Visual Studio installer from the [official website](https://visualstudio.microsoft.com/downloads/).
-      - Install the x64/x86 build tools (C++ compiler and runtime libraries)
-      - Install the CMake tools
-      - (optional) Install Git for Windows
+```bash
+python tests/test_phantom_imrt.py
+```
 
-3. **Install the CUDA Toolkit**:
-   - Download and install the appropriate version of the CUDA Toolkit from the [NVIDIA website](https://developer.nvidia.com/cuda-toolkit).
-   - Make sure the drivers for your GPU are compatible with this version.
+Se o módulo nativo `dose_kernels` não estiver disponível, o import falhará; verifique que a build criou e instalou o módulo Python (`dose_kernels`), tipicamente dentro do seu ambiente (`site-packages/DoseCUDA/dose_kernels.*.so`).
 
-4. **Install Git (if not installed through MSVC)**:
-   - Download and install Git from the [official website](https://git-scm.com/download/win).
-   - During the installation, choose "Git from the command line and also from 3rd-party software".
+Como usar a API Python (exemplo resumido)
 
-5. **Create a virtual environment** (optional but recommended):
-   Open a command prompt (cmd) and run:
-   ```cmd
-   python -m venv dosecuda-env
-   dosecuda-env\Scripts\activate
-   ```
+- Função-chave exportada pelo módulo nativo: `dose_kernels.photon_dose_cuda(model, volume, control_point, gpu_id)`.
+- Em alto nível, o fluxo é:
+  - Carregar CT → `DoseGrid` / `IMRTDoseGrid` (ver `DoseCUDA/plan.py`).
+  - Garantir voxels isotrópicos (usar `grid_utils.resample_ct_to_isotropic`).
+  - Construir `VolumeObject` com `voxel_data`, `origin`, `spacing` (todos `np.single`).
+  - Montar `IMRTPhotonEnergy` (beam model) e `IMRTControlPoint` (CP) com arrays `np.single` e chamadas apropriadas.
+  - Chamar `IMRTDoseGrid.computeIMRTPlan(plan, gpu_id=0)` que orquestra `dose_kernels.photon_dose_cuda(...)` internamente.
 
-6. **Clone the DoseCUDA repository**:
-   ```cmd
-   git clone https://github.com/jhu-som-radiation-oncology/DoseCUDA
-   cd DoseCUDA
-   ```
+Exemplo mínimo (pseudo-code):
 
-7. **Install DoseCUDA using pip**:
-   From a [**developer command prompt**](#additional-notes-windows):
-   ```cmd
-   python -m pip install .
-   ```
+```python
+from DoseCUDA.plan_imrt import IMRTPlan, IMRTDoseGrid
 
-8. **Verify the installation**:
-   Run the test script to verify that DoseCUDA is installed correctly and working:
-   ```cmd
-   python tests\test_phantom_impt.py
-   ```
-   or
-   ```
-   python tests\test_phantom_imrt.py
-   ```
+plan = IMRTPlan(machine_name='VarianTrueBeamHF')
+dose_grid = IMRTDoseGrid()
+dose_grid.loadCTNRRD('/path/to/ct.nrrd')
+dose_grid.resampleCTfromSpacing(2.5)  # garante isotropia
+plan.load_from_rtplan_or_build(...)   # preparar beams e CPs
+dose_grid.computeIMRTPlan(plan, gpu_id=0)
+print('Dose calculada:', dose_grid.dose.shape)
+```
 
-   If everything is installed correctly, the dose calculation output should appear in the terminal, with files saved into `.\test_phantom_output`.
+Entrada do Beam Model — requisitos críticos
+- `profile_radius`, `profile_intensities`, `profile_softening`: arrays 1-D (floats).
+- `spectrum_attenuation_coefficients`, `spectrum_primary_weights`, `spectrum_scatter_weights`: arrays 1-D (mesmo comprimento).
+- `kernel`: array 1-D com 36 floats (layout crítico descrito abaixo).
+- `use_depth_dependent_kernel`: ativa parâmetros adicionais `kernel_depths` e `kernel_params` (n_depths × 24 floats).
+- Transmissões: `jaw_transmission`, `mlc_transmission` (0..1).
+- `mu_calibration`: fator de escala para dose absoluta.
 
-9. **Deactivate the virtual environment** (if used):
-   After using the package, deactivate the virtual environment by typing:
-   ```cmd
-   deactivate
-   ```
+Kernel layout (CRÍTICO para CUDA)
 
-## Additional Notes (Windows):
-- **PATH configuration**: Ensure Python, CMake, and CUDA are added to your system's PATH during their installations to avoid issues.
-- **CUDA compatibility**: Ensure your GPU is compatible with the version of CUDA Toolkit you installed.
-- **Developer command prompt**: Using a [developer command prompt](https://learn.microsoft.com/en-us/visualstudio/ide/reference/command-prompt-powershell) ensures that all MSVC build tools are present in the environment's PATH. Use the `x64 Native Tools Command Prompt` for best results.
+- O CUDA espera a ordem agrupada por coluna: `[theta(6), Am(6), am(6), Bm(6), bm(6), ray_length(6)]`.
+- A carga do CSV nos loaders já monta este layout; se criar manualmente, siga exatamente essa ordem.
 
-# Contact
+Restrições importantes do motor
+- Voxel spacing deve ser isotrópico; se não for, use `resample_ct_to_isotropic` antes de calcular.
+- O uso de `SimpleITK` é necessário para reamostragem e operações DICOM mais robustas.
 
-For any questions or support regarding DoseCUDA, please reach out via email:
-* **DoseCUDA@gmail.com**
+Seleção de GPU e múltiplas GPUs
+- A API aceita `gpu_id` (inteiro) e chama `cudaSetDevice(gpu_id)` internamente (`IMRTClasses.cu`).
+- Use `nvidia-smi` para listar GPUs e IDs.
 
-# Developers
+Diagnóstico e resolução de problemas comuns
+- Erro de import do módulo nativo (`ModuleNotFoundError` para `dose_kernels`): provavelmente a extensão nativa não foi compilada/instalada. Refaça `python -m pip install .` e verifique logs do CMake/nvcc.
+- Erros `nvcc` relacionados a símbolos C++/STL: verifique compatibilidade entre `nvcc` e `gcc`/`clang` (use `CUDAHOSTCXX` para apontar um compilador suportado).
+- Erros de runtime CUDA (exceções std::runtime_error levantadas do CUDA_CHECK): verifique `nvidia-smi` e se o `gpu_id` está correto; confira memória GPU (picos de alocação). Reduce grid size ou use GPU com mais memória.
+- Diferença de HU após leitura DICOM: `plan.loadCTDCM()` aplica checagens e corrige `RescaleSlope/Intercept` quando necessário.
 
-* Tom Hrinivich
-* Calin Reamy
-* Mahasweta Bhattacharya
+Performance & recomendações
+- Use GPUs modernas com memória suficiente (≥8–16 GB para grids clínicos grandes).
+- Experimente espaçamentos maiores (ex.: 2.5 mm) para acelerar cálculo em verificações secundárias clínicas.
+- O código usa texturas 3D e kernels com blocos cúbicos (`TILE_WIDTH`) — ajustar `TILE_WIDTH` no código CUDA requer recompilação.
 
-# Funding Support
-* The Commonwealth Fund
+Desenvolvimento e depuração
+- Para desenvolver/depurar CUDA, habilite build debug via CMake args (modifique `setup.py`/`pyproject.toml` temporariamente):
+
+```bash
+python -m pip install . --global-option=--cmake-args -DCMAKE_BUILD_TYPE=Debug
+```
+
+- Os arquivos de interesse para inspeção rápida: [DoseCUDA/dose_kernels/dosemodule.cu](DoseCUDA/dose_kernels/dosemodule.cu), [DoseCUDA/dose_kernels/IMRTClasses.cu](DoseCUDA/dose_kernels/IMRTClasses.cu), e [DoseCUDA/plan_imrt.py](DoseCUDA/plan_imrt.py).
+
+Checklist pré-execução (rápido)
+- [ ] `nvidia-smi` mostra GPU(s) e driver OK
+- [ ] `nvcc --version` retorna toolchain instalado
+- [ ] `python -m pip install .` completou sem erros e `dose_kernels` importa
+- [ ] CT reamostrado para voxels isotrópicos
+- [ ] Modelo de feixe (`IMRTPhotonEnergy`) validado (`validate_parameters()`)
+
+Contato e contribuições
+- Autores originais: Tom Hrinivich, Calin Reamy, Mahasweta Bhattacharya (veja `pyproject.toml`).
+- Abra issues / PRs no repositório principal para bugfixes e melhorias de performance.
+
+Licença
+- MIT (ver arquivo `LICENSE`).
+
+-----
+
+## Secondary Check Pipeline
+
+DoseCUDA includes a complete secondary dose check workflow for clinical QA, comparing calculated dose against TPS reference.
+
+### Features
+
+- **Gamma 3D Analysis**: Global and local modes with configurable criteria (3%/3mm, 2%/2mm)
+- **DVH Comparison**: Per-ROI metrics comparison with automatic target/OAR classification
+- **MU Sanity Check**: Informational dose/MU ratio check at isocenter
+- **Structured Reports**: JSON (with schema validation) and CSV formats
+
+### Quick Start
+
+```python
+from DoseCUDA.secondary_report import evaluate_secondary_check, SecondaryCheckCriteria
+from DoseCUDA.secondary_report import generate_json_report, generate_csv_report
+
+# Run evaluation
+result = evaluate_secondary_check(
+    dose_calc=my_calculated_dose,     # Resampled to ref grid
+    dose_ref=tps_dose,
+    grid_origin=grid_origin,
+    grid_spacing=grid_spacing,
+    rois=roi_masks,                   # Dict of ROI name -> boolean mask
+    roi_classification=classified_rois,
+    plan=loaded_plan,
+    patient_id="PAT001",
+    plan_name="Prostate VMAT",
+    plan_uid="1.2.3..."
+)
+
+# Generate reports
+generate_json_report(result, "secondary_report.json")
+generate_csv_report(result, "secondary_report.csv")
+
+print(f"Overall Status: {result.overall_status}")
+```
+
+### Components
+
+| Module | Purpose |
+|--------|---------|
+| `DoseCUDA.gamma` | 3D gamma index computation |
+| `DoseCUDA.roi_selection` | Pattern-based ROI classification |
+| `DoseCUDA.mu_sanity` | MU sanity check at isocenter |
+| `DoseCUDA.secondary_report` | Report generation and orchestration |
+
+### Default Criteria (Configurable)
+
+| Check | Parameter | Default Threshold |
+|-------|-----------|-------------------|
+| Gamma 3%/3mm | Pass rate | >= 95% |
+| Gamma 2%/2mm | Pass rate | >= 90% |
+| Gamma threshold | Dose cutoff | 10% of max |
+| Target D95 | Relative diff | <= 3% |
+| Target Dmean | Relative diff | <= 2% |
+| OAR Dmean | Absolute diff | <= 1 Gy |
+| OAR Dmax | Absolute diff | <= 2 Gy |
+| MU ratio | Deviation | <= 5% (INFO) |
+
+### Custom Criteria
+
+```python
+from DoseCUDA.secondary_report import SecondaryCheckCriteria
+
+# Stricter criteria
+criteria = SecondaryCheckCriteria(
+    gamma_3_3_pass_rate=0.98,    # Require 98% pass rate
+    gamma_2_2_pass_rate=0.95,    # Require 95% pass rate
+    target_d95_tolerance_rel=0.02,  # 2% tolerance
+    oar_dmax_tolerance_abs=1.5   # 1.5 Gy tolerance
+)
+
+result = evaluate_secondary_check(..., criteria=criteria)
+```
+
+### Gamma Analysis Standalone
+
+```python
+from DoseCUDA.gamma import compute_gamma_3d, GammaCriteria
+
+# Custom gamma criteria
+criteria = GammaCriteria(
+    dta_mm=3.0,
+    dd_percent=3.0,
+    local=False,              # Global mode
+    dose_threshold_percent=10.0
+)
+
+result = compute_gamma_3d(
+    dose_eval=dose_calculated,
+    dose_ref=dose_reference,
+    spacing_mm=(2.5, 2.5, 2.5),
+    criteria=criteria,
+    return_map=True           # Get full gamma map
+)
+
+print(f"Pass rate: {result.pass_rate:.1%}")
+print(f"Mean gamma: {result.mean_gamma:.3f}")
+```
+
+### ROI Classification
+
+```python
+from DoseCUDA.roi_selection import classify_rois, ROIClassificationConfig
+
+# Use default patterns
+classification = classify_rois(['PTV_70', 'Bladder', 'Rectum', 'BODY'])
+print(classification.targets)   # ['PTV_70']
+print(classification.oars)      # ['Bladder', 'Rectum']
+print(classification.excluded)  # ['BODY']
+
+# Custom patterns
+config = ROIClassificationConfig(
+    target_patterns=[r'^PTV', r'^CTV', r'TARGET'],
+    exclude_patterns=[r'^BODY', r'^EXTERNAL', r'^SUPPORT']
+)
+classification = classify_rois(roi_names, config)
+```
+
+### Running End-to-End Tests
+
+```bash
+# Unit tests (synthetic data, no GPU required)
+pytest tests/test_gamma_metrics.py -v
+pytest tests/test_secondary_report_smoke.py -v
+
+# End-to-end with patient data (requires GPU and data)
+export DOSECUDA_PATIENT_DICOM_DIR=/path/to/patient
+pytest tests/test_patient_end2end.py -v -s
+```
+
+### Output Files
+
+After running the end-to-end test with RTDOSE template:
+- `tests/test_patient_output/secondary_check_report.json` - Full JSON report
+- `tests/test_patient_output/secondary_check_report.csv` - CSV for spreadsheet import
+- `tests/test_patient_output/gamma_summary.json` - Gamma analysis summary
+- `tests/test_patient_output/dvh_comparison.txt` - DVH metrics report
+
+-----
+
+Se desejar, eu posso tambem:
+- Gerar um script `build_linux.sh` que executa as checagens e faz `pip install .` automaticamente;
+- Adicionar instrucoes para cross-compile/CI (GitHub Actions) com GPUs virtuais ou imagens Docker;
+- Criar exemplos praticos executaveis que calculem a dose de um pequeno phantom e salvem saida NRRD/RTDOSE.
+
+Diga qual desses itens quer que eu faca agora.
+

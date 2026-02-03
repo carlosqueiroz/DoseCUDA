@@ -6,7 +6,6 @@ target_sources(${MODULE_NAME}
     PRIVATE
         dosemodule.cu
         CudaClasses.cu
-        IMPTClasses.cu
         IMRTClasses.cu
         TextureClasses.cu)
 

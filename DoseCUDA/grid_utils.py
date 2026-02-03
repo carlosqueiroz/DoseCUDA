@@ -273,7 +273,7 @@ def resample_ct_to_isotropic(
     - Uses linear interpolation for HU values
     - Preserves origin and direction from source
     - New size is calculated to cover same physical volume
-    - This is REQUIRED before calling computeIMRTPlan() or computeIMPTPlan()
+    - This is REQUIRED before calling computeIMRTPlan()
     
     Examples
     --------

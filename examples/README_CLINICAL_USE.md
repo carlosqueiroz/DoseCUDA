@@ -124,18 +124,6 @@ dose_grid.loadCTDCM('/data/patients/patient_001/CT')
 dose_grid.computeIMRTPlan(plan, gpu_id=0)
 ```
 
-**For IMPT:**
-```python
-from DoseCUDA.plan_impt import IMPTPlan, IMPTDoseGrid
-
-plan = IMPTPlan(machine_name='IBA_Proteus_Plus')
-plan.readPlanDicom('/data/patients/patient_001/RTPLAN.dcm')
-
-dose_grid = IMPTDoseGrid()
-dose_grid.loadCTDCM('/data/patients/patient_001/CT')
-dose_grid.computeIMPTPlan(plan, gpu_id=0)
-```
-
 ### Step 4: Load Reference RTDOSE
 
 ```python

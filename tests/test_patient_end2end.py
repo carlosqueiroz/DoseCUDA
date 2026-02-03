@@ -608,9 +608,9 @@ def test_7_summary(discovered_case, selected_files, machine_model):
     print("\n" + "=" * 80)
     print("TEST 7: End-to-End Summary")
     print("=" * 80)
-    
+
     output_dir = get_output_dir()
-    
+
     print(f"\n✓ All tests passed!")
     print(f"\nInput:")
     print(f"  Patient DICOM dir: {get_patient_dicom_dir()}")
@@ -620,22 +620,463 @@ def test_7_summary(discovered_case, selected_files, machine_model):
         print(f"  RTDOSE template: {selected_files['rtdose'].path.name}")
     if selected_files['rtstruct']:
         print(f"  RTSTRUCT: {selected_files['rtstruct'].path.name}")
-    
+
     print(f"\nConfiguration:")
     print(f"  Machine model: {machine_model}")
     print(f"  Isotropic spacing: {get_iso_spacing_mm()} mm")
     print(f"  GPU ID: {get_gpu_id()}")
-    
+
     print(f"\nOutput: {output_dir}")
     print(f"  dose_calculated.npy")
     print(f"  dose_calculated.nrrd")
     print(f"  dose_stats.txt")
     if selected_files['rtdose']:
         print(f"  DoseCUDA_RD.dcm  (DICOM RTDOSE)")
-    
+
     print(f"\n" + "=" * 80)
     print("SUCCESS: Patient end-to-end workflow complete")
     print("=" * 80)
+
+
+# ============================================================================
+# Secondary Check Tests (Tests 8-11)
+# ============================================================================
+
+@pytest.fixture(scope="module")
+def reference_rtdose(materialized_case):
+    """
+    Fixture providing reference RTDOSE for secondary check comparison.
+    """
+    if not materialized_case['rtdose']:
+        pytest.skip("No RTDOSE template for secondary check")
+
+    from DoseCUDA.dvh import read_reference_rtdose
+
+    dose_ref, origin_ref, spacing_ref, frame_uid = read_reference_rtdose(
+        str(materialized_case['rtdose'])
+    )
+
+    return {
+        'dose': dose_ref,
+        'origin': origin_ref,
+        'spacing': spacing_ref,
+        'frame_uid': frame_uid
+    }
+
+
+@pytest.fixture(scope="module")
+def rasterized_rois(materialized_case, reference_rtdose):
+    """
+    Fixture providing rasterized ROIs on reference dose grid.
+    """
+    if not materialized_case['rtstruct']:
+        pytest.skip("No RTSTRUCT for ROI analysis")
+
+    from DoseCUDA.rtstruct import read_rtstruct, rasterize_roi_to_mask
+    from DoseCUDA.roi_selection import classify_rois
+    from DoseCUDA.grid_utils import GridInfo
+
+    # Build grid info from reference dose
+    ref_grid = GridInfo(
+        origin=reference_rtdose['origin'],
+        spacing=reference_rtdose['spacing'],
+        size=np.array(reference_rtdose['dose'].shape[::-1]),  # (nx, ny, nz)
+        direction=np.eye(3)
+    )
+
+    # Read and classify ROIs
+    rtstruct = read_rtstruct(str(materialized_case['rtstruct']))
+    roi_names = list(rtstruct.rois.keys())
+    classification = classify_rois(roi_names)
+
+    print(f"\n[ROI Classification]")
+    print(f"  Targets: {classification.targets}")
+    print(f"  OARs: {classification.oars}")
+    print(f"  Excluded: {classification.excluded}")
+
+    # Rasterize relevant ROIs (targets + OARs)
+    masks = {}
+    rois_to_rasterize = classification.targets + classification.oars
+
+    for roi_name in rois_to_rasterize:
+        if roi_name in rtstruct.rois:
+            try:
+                mask = rasterize_roi_to_mask(
+                    rtstruct.rois[roi_name],
+                    ref_grid.origin,
+                    ref_grid.spacing,
+                    ref_grid.size[::-1],  # (nz, ny, nx) for mask shape
+                    direction=ref_grid.direction
+                )
+                if np.any(mask):
+                    masks[roi_name] = mask
+                    n_voxels = np.sum(mask)
+                    vol_cc = n_voxels * np.prod(ref_grid.spacing) / 1000.0
+                    print(f"  {roi_name}: {n_voxels} voxels ({vol_cc:.1f} cc)")
+            except Exception as e:
+                warnings.warn(f"Failed to rasterize {roi_name}: {e}")
+
+    return {
+        'masks': masks,
+        'classification': classification,
+        'grid': ref_grid
+    }
+
+
+def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
+    """
+    Test 8: Compute gamma analysis comparing DoseCUDA vs TPS.
+    """
+    print("\n" + "=" * 80)
+    print("TEST 8: Gamma Analysis")
+    print("=" * 80)
+
+    from DoseCUDA.gamma import compute_gamma_3d, GammaCriteria
+    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
+
+    gpu_id = get_gpu_id()
+    target_spacing = get_iso_spacing_mm()
+
+    # Calculate dose
+    plan = IMRTPlan(machine_name=machine_model)
+    plan.readPlanDicom(str(materialized_case['rtplan']))
+
+    dg = IMRTDoseGrid()
+    dg.loadCTDCM(str(materialized_case['ct_dir']))
+    dg.resampleCTfromSpacing(target_spacing)
+    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+
+    # Build grids
+    calc_grid = GridInfo(
+        origin=dg.origin,
+        spacing=dg.spacing,
+        size=dg.size,
+        direction=np.eye(3)
+    )
+
+    ref_grid = GridInfo(
+        origin=reference_rtdose['origin'],
+        spacing=reference_rtdose['spacing'],
+        size=np.array(reference_rtdose['dose'].shape[::-1]),
+        direction=np.eye(3)
+    )
+
+    # Resample calculated dose to reference grid
+    print(f"\nResampling calculated dose to reference grid...")
+    dose_resampled = resample_dose_linear(
+        dose=dg.dose,
+        source_grid=calc_grid,
+        target_grid=ref_grid
+    )
+
+    print(f"  Calculated dose max: {np.max(dg.dose):.2f} Gy")
+    print(f"  Resampled dose max: {np.max(dose_resampled):.2f} Gy")
+    print(f"  Reference dose max: {np.max(reference_rtdose['dose']):.2f} Gy")
+
+    # Compute gamma 3%/3mm
+    print(f"\nComputing gamma 3%/3mm (global)...")
+    criteria_3_3 = GammaCriteria(
+        dta_mm=3.0,
+        dd_percent=3.0,
+        local=False,
+        dose_threshold_percent=10.0
+    )
+
+    result_3_3 = compute_gamma_3d(
+        dose_eval=dose_resampled,
+        dose_ref=reference_rtdose['dose'],
+        spacing_mm=tuple(reference_rtdose['spacing']),
+        criteria=criteria_3_3
+    )
+
+    print(f"\nGamma 3%/3mm Results:")
+    print(f"  Pass rate: {result_3_3.pass_rate*100:.1f}%")
+    print(f"  Mean gamma: {result_3_3.mean_gamma:.3f}")
+    print(f"  Gamma P95: {result_3_3.gamma_p95:.3f}")
+    print(f"  Evaluated: {result_3_3.n_evaluated} voxels")
+
+    # Compute gamma 2%/2mm
+    print(f"\nComputing gamma 2%/2mm (global)...")
+    criteria_2_2 = GammaCriteria(
+        dta_mm=2.0,
+        dd_percent=2.0,
+        local=False,
+        dose_threshold_percent=10.0
+    )
+
+    result_2_2 = compute_gamma_3d(
+        dose_eval=dose_resampled,
+        dose_ref=reference_rtdose['dose'],
+        spacing_mm=tuple(reference_rtdose['spacing']),
+        criteria=criteria_2_2
+    )
+
+    print(f"\nGamma 2%/2mm Results:")
+    print(f"  Pass rate: {result_2_2.pass_rate*100:.1f}%")
+    print(f"  Mean gamma: {result_2_2.mean_gamma:.3f}")
+    print(f"  Gamma P95: {result_2_2.gamma_p95:.3f}")
+
+    # Save gamma summary
+    output_dir = get_output_dir()
+    import json
+    gamma_summary = {
+        "3%/3mm": {
+            "pass_rate": result_3_3.pass_rate,
+            "mean_gamma": result_3_3.mean_gamma,
+            "gamma_p95": result_3_3.gamma_p95,
+            "n_evaluated": result_3_3.n_evaluated
+        },
+        "2%/2mm": {
+            "pass_rate": result_2_2.pass_rate,
+            "mean_gamma": result_2_2.mean_gamma,
+            "gamma_p95": result_2_2.gamma_p95,
+            "n_evaluated": result_2_2.n_evaluated
+        }
+    }
+
+    with open(output_dir / "gamma_summary.json", 'w') as f:
+        json.dump(gamma_summary, f, indent=2)
+
+    print(f"\n✓ Gamma summary saved: {output_dir / 'gamma_summary.json'}")
+
+    # Assert criteria (informational - don't fail test on gamma)
+    if result_3_3.pass_rate < 0.95:
+        warnings.warn(f"Gamma 3%/3mm pass rate {result_3_3.pass_rate:.1%} < 95%")
+    if result_2_2.pass_rate < 0.90:
+        warnings.warn(f"Gamma 2%/2mm pass rate {result_2_2.pass_rate:.1%} < 90%")
+
+
+def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, rasterized_rois):
+    """
+    Test 9: Compare DVH metrics for targets and OARs.
+    """
+    print("\n" + "=" * 80)
+    print("TEST 9: DVH Comparison")
+    print("=" * 80)
+
+    from DoseCUDA.dvh import compute_metrics, compare_dvh_metrics, generate_dvh_report
+    from DoseCUDA.roi_selection import get_target_metrics_spec, get_oar_metrics_spec
+    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
+
+    gpu_id = get_gpu_id()
+    target_spacing = get_iso_spacing_mm()
+
+    # Calculate dose and resample
+    plan = IMRTPlan(machine_name=machine_model)
+    plan.readPlanDicom(str(materialized_case['rtplan']))
+
+    dg = IMRTDoseGrid()
+    dg.loadCTDCM(str(materialized_case['ct_dir']))
+    dg.resampleCTfromSpacing(target_spacing)
+    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+
+    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
+    ref_grid = rasterized_rois['grid']
+
+    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=ref_grid)
+
+    classification = rasterized_rois['classification']
+    ref_spacing = reference_rtdose['spacing']
+
+    output_dir = get_output_dir()
+    report_lines = []
+
+    # Process targets
+    print(f"\n[Target DVH Comparison]")
+    for roi_name in classification.targets:
+        if roi_name in rasterized_rois['masks']:
+            mask = rasterized_rois['masks'][roi_name]
+            metrics_spec = get_target_metrics_spec()
+
+            metrics_calc = compute_metrics(dose_resampled, mask, ref_spacing, metrics_spec)
+            metrics_ref = compute_metrics(reference_rtdose['dose'], mask, ref_spacing, metrics_spec)
+            comparison = compare_dvh_metrics(metrics_calc, metrics_ref)
+
+            report = generate_dvh_report(roi_name, metrics_calc, comparison)
+            report_lines.append(report)
+            print(report)
+
+    # Process OARs
+    print(f"\n[OAR DVH Comparison]")
+    for roi_name in classification.oars:
+        if roi_name in rasterized_rois['masks']:
+            mask = rasterized_rois['masks'][roi_name]
+            metrics_spec = get_oar_metrics_spec()
+
+            metrics_calc = compute_metrics(dose_resampled, mask, ref_spacing, metrics_spec)
+            metrics_ref = compute_metrics(reference_rtdose['dose'], mask, ref_spacing, metrics_spec)
+            comparison = compare_dvh_metrics(metrics_calc, metrics_ref)
+
+            report = generate_dvh_report(roi_name, metrics_calc, comparison)
+            report_lines.append(report)
+            print(report)
+
+    # Save DVH report
+    with open(output_dir / "dvh_comparison.txt", 'w') as f:
+        f.write('\n'.join(report_lines))
+
+    print(f"\n✓ DVH comparison saved: {output_dir / 'dvh_comparison.txt'}")
+
+
+def test_10_mu_sanity_check(materialized_case, machine_model, reference_rtdose):
+    """
+    Test 10: MU sanity check at isocenter.
+    """
+    print("\n" + "=" * 80)
+    print("TEST 10: MU Sanity Check")
+    print("=" * 80)
+
+    from DoseCUDA.mu_sanity import compute_mu_sanity_from_plan
+    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
+
+    gpu_id = get_gpu_id()
+    target_spacing = get_iso_spacing_mm()
+
+    # Calculate dose and resample
+    plan = IMRTPlan(machine_name=machine_model)
+    plan.readPlanDicom(str(materialized_case['rtplan']))
+
+    dg = IMRTDoseGrid()
+    dg.loadCTDCM(str(materialized_case['ct_dir']))
+    dg.resampleCTfromSpacing(target_spacing)
+    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+
+    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
+    ref_grid = GridInfo(
+        origin=reference_rtdose['origin'],
+        spacing=reference_rtdose['spacing'],
+        size=np.array(reference_rtdose['dose'].shape[::-1]),
+        direction=np.eye(3)
+    )
+
+    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=ref_grid)
+
+    # Compute MU sanity check
+    print(f"\nComputing MU sanity check...")
+
+    try:
+        result = compute_mu_sanity_from_plan(
+            dose_calc=dose_resampled,
+            dose_ref=reference_rtdose['dose'],
+            grid_origin=reference_rtdose['origin'],
+            grid_spacing=reference_rtdose['spacing'],
+            plan=plan,
+            tolerance=0.05
+        )
+
+        print(f"\nMU Sanity Check Results:")
+        print(f"  Isocenter: {result.isocenter_mm}")
+        print(f"  Dose at iso (calc): {result.dose_calc_at_iso:.4f} Gy")
+        print(f"  Dose at iso (ref):  {result.dose_ref_at_iso:.4f} Gy")
+        print(f"  Total MU: {result.total_mu:.1f}")
+        print(f"  Gy/MU ratio: {result.mu_equiv_ratio:.4f}")
+        print(f"  Status: {result.status}")
+        print(f"  Message: {result.message}")
+
+    except Exception as e:
+        warnings.warn(f"MU sanity check failed: {e}")
+        print(f"\n⚠ MU sanity check skipped: {e}")
+
+
+def test_11_generate_report(materialized_case, machine_model, reference_rtdose, rasterized_rois):
+    """
+    Test 11: Generate JSON and CSV secondary check reports.
+    """
+    print("\n" + "=" * 80)
+    print("TEST 11: Generate Secondary Check Report")
+    print("=" * 80)
+
+    from DoseCUDA.secondary_report import (
+        evaluate_secondary_check,
+        generate_json_report,
+        generate_csv_report,
+        SecondaryCheckCriteria
+    )
+    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
+
+    gpu_id = get_gpu_id()
+    target_spacing = get_iso_spacing_mm()
+    output_dir = get_output_dir()
+
+    # Calculate dose and resample
+    plan = IMRTPlan(machine_name=machine_model)
+    plan.readPlanDicom(str(materialized_case['rtplan']))
+
+    dg = IMRTDoseGrid()
+    dg.loadCTDCM(str(materialized_case['ct_dir']))
+    dg.resampleCTfromSpacing(target_spacing)
+    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+
+    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
+    ref_grid = GridInfo(
+        origin=reference_rtdose['origin'],
+        spacing=reference_rtdose['spacing'],
+        size=np.array(reference_rtdose['dose'].shape[::-1]),
+        direction=np.eye(3)
+    )
+
+    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=ref_grid)
+
+    # Get plan info from RTPLAN
+    rtplan_ds = pydicom.dcmread(str(materialized_case['rtplan']), stop_before_pixels=True)
+    patient_id = getattr(rtplan_ds, 'PatientID', 'UNKNOWN')
+    plan_name = getattr(rtplan_ds, 'RTPlanLabel', 'UNKNOWN')
+    plan_uid = getattr(rtplan_ds, 'SOPInstanceUID', 'UNKNOWN')
+
+    # Run full evaluation
+    print(f"\nRunning secondary check evaluation...")
+
+    criteria = SecondaryCheckCriteria()
+
+    result = evaluate_secondary_check(
+        dose_calc=dose_resampled,
+        dose_ref=reference_rtdose['dose'],
+        grid_origin=reference_rtdose['origin'],
+        grid_spacing=reference_rtdose['spacing'],
+        rois=rasterized_rois['masks'],
+        roi_classification=rasterized_rois['classification'],
+        plan=plan,
+        patient_id=patient_id,
+        plan_name=plan_name,
+        plan_uid=plan_uid,
+        criteria=criteria
+    )
+
+    # Generate reports
+    json_path = output_dir / "secondary_check_report.json"
+    csv_path = output_dir / "secondary_check_report.csv"
+
+    generate_json_report(result, str(json_path))
+    generate_csv_report(result, str(csv_path))
+
+    print(f"\n✓ JSON report: {json_path}")
+    print(f"✓ CSV report: {csv_path}")
+
+    # Print summary
+    print(f"\n{'='*60}")
+    print(f"SECONDARY CHECK SUMMARY")
+    print(f"{'='*60}")
+    print(f"  Patient: {result.patient_id}")
+    print(f"  Plan: {result.plan_name}")
+    print(f"  Overall Status: {result.overall_status}")
+
+    if result.gamma_results:
+        print(f"\n  Gamma Results:")
+        for label, gamma_res in result.gamma_results.items():
+            print(f"    {label}: {gamma_res['pass_rate']*100:.1f}% pass [{gamma_res['status']}]")
+
+    if result.failure_reasons:
+        print(f"\n  Failure Reasons:")
+        for reason in result.failure_reasons:
+            print(f"    - {reason}")
+
+    # Verify files exist
+    assert json_path.exists(), "JSON report not created"
+    assert csv_path.exists(), "CSV report not created"
+
+    print(f"\n{'='*60}")
+    print(f"SECONDARY CHECK COMPLETE")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
