@@ -6,6 +6,7 @@
 
 #include "IMRTClasses.cuh"
 #include "MemoryClasses.h"
+#include "GammaKernels.cuh"
 
 
 /** @brief Check a NumPy array for dimensionality and contained element type
@@ -366,12 +367,226 @@ double mu_cal,
 }
 
 
+/**
+ * @brief Python wrapper for CUDA gamma computation
+ * 
+ * Arguments:
+ *   dose_eval: 3D numpy array (float32) - evaluated dose
+ *   dose_ref: 3D numpy array (float32) - reference dose
+ *   spacing: tuple (sx, sy, sz) in mm
+ *   dta_mm: float - distance-to-agreement in mm
+ *   dd_percent: float - dose difference percentage
+ *   dose_threshold_percent: float - threshold as % of max dose
+ *   global_dose: float - global normalization dose (or 0 to use max of dose_ref)
+ *   local: bool - use local normalization
+ *   max_gamma: float - cap gamma values
+ *   return_map: bool - whether to return gamma map
+ *   gpu_id: int - GPU device ID
+ * 
+ * Returns:
+ *   Dictionary with:
+ *     - pass_rate: float
+ *     - mean_gamma: float
+ *     - gamma_p95: float
+ *     - n_evaluated: int
+ *     - n_passed: int
+ *     - gamma_map: numpy array (if return_map=True)
+ */
+static PyObject* gamma_3d(PyObject* self, PyObject* args, PyObject* kwargs) {
+	
+	PyArrayObject *dose_eval_arr, *dose_ref_arr;
+	PyObject *spacing_tuple;
+	double dta_mm, dd_percent, dose_threshold_percent, global_dose, max_gamma;
+	int local_norm, return_map, gpu_id;
+	
+	static char* kwlist[] = {
+		"dose_eval", "dose_ref", "spacing", 
+		"dta_mm", "dd_percent", "dose_threshold_percent",
+		"global_dose", "local", "max_gamma", "return_map", "gpu_id", NULL
+	};
+	
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!Oddddpdpi", kwlist,
+			&PyArray_Type, &dose_eval_arr,
+			&PyArray_Type, &dose_ref_arr,
+			&spacing_tuple,
+			&dta_mm, &dd_percent, &dose_threshold_percent,
+			&global_dose, &local_norm, &max_gamma, &return_map, &gpu_id)) {
+		return NULL;
+	}
+	
+	// Validate arrays
+	if (!pyarray_typecheck(dose_eval_arr, 3, NPY_FLOAT)) {
+		PyErr_SetString(PyExc_ValueError, "dose_eval must be 3D float32 array");
+		return NULL;
+	}
+	if (!pyarray_typecheck(dose_ref_arr, 3, NPY_FLOAT)) {
+		PyErr_SetString(PyExc_ValueError, "dose_ref must be 3D float32 array");
+		return NULL;
+	}
+	
+	// Check shapes match
+	npy_intp *shape_eval = PyArray_DIMS(dose_eval_arr);
+	npy_intp *shape_ref = PyArray_DIMS(dose_ref_arr);
+	if (shape_eval[0] != shape_ref[0] || 
+		shape_eval[1] != shape_ref[1] || 
+		shape_eval[2] != shape_ref[2]) {
+		PyErr_SetString(PyExc_ValueError, "dose_eval and dose_ref must have same shape");
+		return NULL;
+	}
+	
+	// Parse spacing tuple
+	if (!PyTuple_Check(spacing_tuple) || PyTuple_Size(spacing_tuple) != 3) {
+		PyErr_SetString(PyExc_ValueError, "spacing must be tuple of 3 floats");
+		return NULL;
+	}
+	double sx = PyFloat_AsDouble(PyTuple_GetItem(spacing_tuple, 0));
+	double sy = PyFloat_AsDouble(PyTuple_GetItem(spacing_tuple, 1));
+	double sz = PyFloat_AsDouble(PyTuple_GetItem(spacing_tuple, 2));
+	
+	// Get array data
+	float* dose_eval_data = pyarray_as<float>(dose_eval_arr);
+	float* dose_ref_data = pyarray_as<float>(dose_ref_arr);
+	
+	// Dimensions (z, y, x for numpy but we store as nx, ny, nz)
+	int nz = (int)shape_ref[0];
+	int ny = (int)shape_ref[1];
+	int nx = (int)shape_ref[2];
+	
+	// Compute global dose if not specified
+	if (global_dose <= 0) {
+		size_t n_voxels = (size_t)nx * ny * nz;
+		global_dose = 0;
+		for (size_t i = 0; i < n_voxels; i++) {
+			if (dose_ref_data[i] > global_dose) global_dose = dose_ref_data[i];
+		}
+	}
+	
+	// Prepare parameters
+	GammaParams params;
+	params.nx = nx;
+	params.ny = ny;
+	params.nz = nz;
+	params.sx = (float)sx;
+	params.sy = (float)sy;
+	params.sz = (float)sz;
+	params.dta_mm = (float)dta_mm;
+	params.dd_percent = (float)dd_percent;
+	params.dose_threshold_percent = (float)dose_threshold_percent;
+	params.global_dose = (float)global_dose;
+	params.local_normalization = (bool)local_norm;
+	params.max_gamma = (float)max_gamma;
+	
+	// Allocate gamma map if needed
+	float* gamma_map_data = nullptr;
+	PyObject* gamma_map_arr = nullptr;
+	if (return_map) {
+		gamma_map_arr = PyArray_SimpleNew(3, shape_ref, NPY_FLOAT);
+		if (!gamma_map_arr) return NULL;
+		gamma_map_data = (float*)PyArray_DATA((PyArrayObject*)gamma_map_arr);
+	}
+	
+	// Prepare stats
+	GammaStats stats;
+	memset(&stats, 0, sizeof(GammaStats));
+	
+	try {
+		// Set GPU
+		cudaError_t err = cudaSetDevice(gpu_id);
+		if (err != cudaSuccess) {
+			throw std::runtime_error(cudaGetErrorString(err));
+		}
+		
+		// Run gamma computation
+		gamma_3d_cuda(dose_eval_data, dose_ref_data, gamma_map_data, params, &stats, 0);
+		
+	} catch (std::runtime_error &e) {
+		if (gamma_map_arr) Py_DECREF(gamma_map_arr);
+		PyErr_Format(PyExc_RuntimeError, "CUDA gamma error: %s", e.what());
+		return NULL;
+	}
+	
+	// Calculate pass rate and mean
+	double pass_rate = (stats.n_evaluated > 0) 
+		? (double)stats.n_passed / stats.n_evaluated 
+		: 0.0;
+	double mean_gamma = (stats.n_evaluated > 0) 
+		? stats.sum_gamma / stats.n_evaluated 
+		: 0.0;
+	
+	// Calculate P95 from histogram
+	double gamma_p95 = max_gamma;
+	if (stats.n_evaluated > 0) {
+		unsigned int target_count = (unsigned int)(0.95 * stats.n_evaluated);
+		unsigned int cumsum = 0;
+		for (int bin = 0; bin <= 100; bin++) {
+			cumsum += stats.histogram[bin];
+			if (cumsum >= target_count) {
+				gamma_p95 = (bin / 100.0) * max_gamma;
+				break;
+			}
+		}
+	}
+	
+	// Build result dictionary
+	PyObject* result = PyDict_New();
+	PyDict_SetItemString(result, "pass_rate", PyFloat_FromDouble(pass_rate));
+	PyDict_SetItemString(result, "mean_gamma", PyFloat_FromDouble(mean_gamma));
+	PyDict_SetItemString(result, "gamma_p95", PyFloat_FromDouble(gamma_p95));
+	PyDict_SetItemString(result, "n_evaluated", PyLong_FromUnsignedLong(stats.n_evaluated));
+	PyDict_SetItemString(result, "n_passed", PyLong_FromUnsignedLong(stats.n_passed));
+	
+	if (gamma_map_arr) {
+		PyDict_SetItemString(result, "gamma_map", gamma_map_arr);
+		Py_DECREF(gamma_map_arr);  // Dict now owns reference
+	}
+	
+	return result;
+}
+
+
+/**
+ * @brief Check if CUDA gamma is available
+ */
+static PyObject* gamma_cuda_is_available(PyObject* self, PyObject* args) {
+	if (gamma_cuda_available()) {
+		Py_RETURN_TRUE;
+	}
+	Py_RETURN_FALSE;
+}
+
+
 static PyMethodDef DoseMethods[] = {
 	{
 		"photon_dose_cuda",
 		photon_dose,
 		METH_VARARGS,
 		"Compute photon dose using collapsed cone convolution on the GPU."
+	},
+	{
+		"gamma_3d_cuda",
+		(PyCFunction)gamma_3d,
+		METH_VARARGS | METH_KEYWORDS,
+		"Compute 3D gamma index on GPU.\n\n"
+		"Args:\n"
+		"    dose_eval: 3D float32 array - evaluated dose\n"
+		"    dose_ref: 3D float32 array - reference dose\n"
+		"    spacing: tuple (sx, sy, sz) in mm\n"
+		"    dta_mm: distance-to-agreement in mm\n"
+		"    dd_percent: dose difference percentage (e.g., 3.0 for 3%)\n"
+		"    dose_threshold_percent: threshold as % of global dose\n"
+		"    global_dose: reference dose for normalization (0 = use max)\n"
+		"    local: use local normalization (bool)\n"
+		"    max_gamma: cap gamma values\n"
+		"    return_map: return gamma map array (bool)\n"
+		"    gpu_id: GPU device ID\n\n"
+		"Returns:\n"
+		"    dict with pass_rate, mean_gamma, gamma_p95, n_evaluated, n_passed, gamma_map"
+	},
+	{
+		"gamma_cuda_available",
+		gamma_cuda_is_available,
+		METH_NOARGS,
+		"Check if CUDA gamma computation is available."
 	},
 	{ 0 }
 };

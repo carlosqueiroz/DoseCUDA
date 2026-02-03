@@ -7,7 +7,8 @@ target_sources(${MODULE_NAME}
         dosemodule.cu
         CudaClasses.cu
         IMRTClasses.cu
-        TextureClasses.cu)
+        TextureClasses.cu
+        GammaKernels.cu)
 
 target_include_directories(${MODULE_NAME}
     PRIVATE
