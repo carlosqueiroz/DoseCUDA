@@ -329,7 +329,7 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 	beam->pointXYZImageToHead(&vox_img_xyz, &vox_head_xyz);
 
 	float dose_value = 0.0f;
-	float sp = dose->spacing / 10.0f; //cm
+	const float step_cm = dose->spacing * 0.1f; // cm
 
 	__shared__ struct {
 		float cosx, sinx;
@@ -382,12 +382,10 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 			beam->kernelTilt(&vox_img_xyz, &tangent_img_xyz);
 
 			float Rs = 0.0f, Rp = 0.0f, Ti = 0.0f;
-			float Di = AIR_DENSITY * sp;
-			float ray_length = ray_length_init;
 			float Ti_hist = 0.0f;
 			bool first_sample = true;
 
-			while(ray_length >= 0.0f) {
+			for (float ray_length = ray_length_init; ray_length >= 0.0f; ray_length -= step_cm) {
 
 				PointXYZ ray_img_xyz;
 				ray_img_xyz.x = fmaf(tangent_img_xyz.x, ray_length * 10.0f, vox_img_xyz.x);
@@ -396,9 +394,7 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 
 				dose->pointXYZtoTextureXYZ(&ray_img_xyz, &tex_img_xyz, beam);
 				Ti = TERMATexture.sample(tex_img_xyz);
-				Di = DensityTexture.sample(tex_img_xyz);
-
-				Di = fmaxf(Di, AIR_DENSITY) * sp;
+				float Di = fmaxf(DensityTexture.sample(tex_img_xyz), AIR_DENSITY) * step_cm;
 
 				// Optional heterogeneity smoothing (history correction)
 				float Ti_eff;
@@ -421,9 +417,6 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 				// Scatter: usar distância radiológica uma única vez
 				const auto expon_s = expf(-bm * Di);
 				Rs = Rs * expon_s + (Ti_eff * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s));
-
-				// Avança o feixe; sem isso o loop não termina
-				ray_length -= sp;
 
 			}
 
