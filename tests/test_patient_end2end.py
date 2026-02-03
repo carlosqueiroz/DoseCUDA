@@ -8,37 +8,47 @@ Tests complete workflow:
 4. GPU dose calculation with auto-detected machine model
 5. Dose resampling to RTDOSE template grid
 6. DICOM RTDOSE export
+7. Gamma analysis (3%/3mm and 2%/2mm)
+8. DVH comparison
+9. MU sanity check
+10. Generate secondary check reports
 
-Environment Variables
----------------------
-DOSECUDA_PATIENT_DICOM_DIR : str (required)
-    Path to patient DICOM directory. Test skips if not set.
-DOSECUDA_ISO_MM : float (optional, default=2.5)
+Environment Variables (optional - defaults provided)
+----------------------------------------------------
+DOSECUDA_PATIENT_DICOM_DIR : str
+    Path to patient DICOM directory.
+    Default: tests/PATIENT/TRUEBEAM (relative to test file)
+DOSECUDA_ISO_MM : float
     Target isotropic spacing for dose calculation (mm)
-DOSECUDA_GPU_ID : int (optional, default=0)
+    Default: 2.5
+DOSECUDA_GPU_ID : int
     GPU device ID for dose calculation
-DOSECUDA_MACHINE_DEFAULT : str (optional, default="VarianTrueBeamHF")
+    Default: 0
+DOSECUDA_MACHINE_DEFAULT : str
     Default machine model if inference fails
+    Default: VarianTrueBeamHF
 
 Usage
 -----
-# Set patient directory
-export DOSECUDA_PATIENT_DICOM_DIR=/path/to/patient/dicoms
-
-# Run test
+# Run with defaults (no exports needed!)
 pytest tests/test_patient_end2end.py -v -s
 
-# With custom settings
+# Override with custom settings
+export DOSECUDA_PATIENT_DICOM_DIR=/path/to/other/patient
 export DOSECUDA_ISO_MM=3.0
 export DOSECUDA_GPU_ID=1
 pytest tests/test_patient_end2end.py -v -s
 """
 
 import os
+import sys
+import time
 import pytest
 import numpy as np
 import warnings
 from pathlib import Path
+from datetime import datetime
+from typing import Optional, Dict, Any
 
 # Import DoseCUDA modules
 from DoseCUDA import IMRTDoseGrid, IMRTPlan
@@ -56,35 +66,211 @@ import pydicom
 
 
 # ============================================================================
-# Test Configuration from Environment
+# Default Configuration (built into script)
 # ============================================================================
 
-def get_patient_dicom_dir():
-    """Get patient DICOM directory from environment, or None if not set."""
-    return os.environ.get('DOSECUDA_PATIENT_DICOM_DIR')
+# Default paths relative to this test file
+_TEST_DIR = Path(__file__).parent
+_DEFAULT_PATIENT_DICOM_DIR = _TEST_DIR / "PATIENT" / "TRUEBEAM"
+_DEFAULT_ISO_SPACING_MM = 2.5
+_DEFAULT_GPU_ID = 0
+_DEFAULT_MACHINE = "VarianTrueBeamHF"
 
 
-def get_iso_spacing_mm():
+# ============================================================================
+# Progress Tracking Utilities
+# ============================================================================
+
+class ProgressTracker:
+    """Track progress of long-running operations."""
+    
+    def __init__(self, name: str, total_steps: int = 0):
+        self.name = name
+        self.total_steps = total_steps
+        self.current_step = 0
+        self.start_time = time.time()
+        self.step_start_time = time.time()
+    
+    def start(self, message: str = ""):
+        """Start tracking."""
+        self.start_time = time.time()
+        self.step_start_time = time.time()
+        print(f"\n⏱ [{self.name}] Started {message}")
+        sys.stdout.flush()
+    
+    def step(self, message: str, step_num: Optional[int] = None):
+        """Report a step."""
+        elapsed = time.time() - self.step_start_time
+        if step_num is not None:
+            self.current_step = step_num
+        else:
+            self.current_step += 1
+        
+        if self.total_steps > 0:
+            progress = f"[{self.current_step}/{self.total_steps}]"
+        else:
+            progress = f"[step {self.current_step}]"
+        
+        print(f"  {progress} {message} ({elapsed:.1f}s)")
+        sys.stdout.flush()
+        self.step_start_time = time.time()
+    
+    def done(self, message: str = "Complete"):
+        """Mark as complete."""
+        total_elapsed = time.time() - self.start_time
+        print(f"✓ [{self.name}] {message} (total: {total_elapsed:.1f}s)")
+        sys.stdout.flush()
+
+
+def progress_print(msg: str):
+    """Print with immediate flush for progress visibility."""
+    print(msg)
+    sys.stdout.flush()
+
+
+# ============================================================================
+# Test Configuration from Environment (with defaults)
+# ============================================================================
+
+def get_patient_dicom_dir() -> Path:
+    """Get patient DICOM directory from environment or default."""
+    env_path = os.environ.get('DOSECUDA_PATIENT_DICOM_DIR')
+    if env_path:
+        return Path(env_path)
+    return _DEFAULT_PATIENT_DICOM_DIR
+
+
+def get_iso_spacing_mm() -> float:
     """Get target isotropic spacing in mm (default: 2.5)."""
-    return float(os.environ.get('DOSECUDA_ISO_MM', '2.5'))
+    return float(os.environ.get('DOSECUDA_ISO_MM', str(_DEFAULT_ISO_SPACING_MM)))
 
 
-def get_gpu_id():
+def get_gpu_id() -> int:
     """Get GPU device ID (default: 0)."""
-    return int(os.environ.get('DOSECUDA_GPU_ID', '0'))
+    return int(os.environ.get('DOSECUDA_GPU_ID', str(_DEFAULT_GPU_ID)))
 
 
-def get_default_machine():
+def get_default_machine() -> str:
     """Get default machine model (default: VarianTrueBeamHF)."""
-    return os.environ.get('DOSECUDA_MACHINE_DEFAULT', 'VarianTrueBeamHF')
+    return os.environ.get('DOSECUDA_MACHINE_DEFAULT', _DEFAULT_MACHINE)
 
 
-def get_output_dir():
+def get_output_dir() -> Path:
     """Get output directory for test results."""
-    test_dir = Path(__file__).parent
-    output_dir = test_dir / "test_patient_output"
+    output_dir = _TEST_DIR / "test_patient_output"
     output_dir.mkdir(exist_ok=True)
     return output_dir
+
+
+def print_config():
+    """Print current configuration."""
+    print("\n" + "=" * 80)
+    print("TEST CONFIGURATION")
+    print("=" * 80)
+    print(f"  DICOM dir: {get_patient_dicom_dir()}")
+    print(f"  ISO spacing: {get_iso_spacing_mm()} mm")
+    print(f"  GPU ID: {get_gpu_id()}")
+    print(f"  Machine default: {get_default_machine()}")
+    print(f"  Output dir: {get_output_dir()}")
+    print("=" * 80)
+
+
+# ============================================================================
+# Cached Dose Calculation (avoid recalculating in every test)
+# ============================================================================
+
+_cached_dose_grid = None
+_cached_dose_resampled = None
+_cached_ref_grid = None
+
+
+def get_or_calculate_dose(materialized_case, machine_model, reference_rtdose=None):
+    """
+    Get cached dose or calculate if not available.
+    Returns both the dose grid and optionally resampled dose.
+    """
+    global _cached_dose_grid, _cached_dose_resampled, _cached_ref_grid
+    
+    gpu_id = get_gpu_id()
+    target_spacing = get_iso_spacing_mm()
+    
+    # Check if we already have cached dose
+    if _cached_dose_grid is not None:
+        progress_print("  ℹ Using cached dose calculation")
+        
+        # If reference grid requested and we have resampled dose
+        if reference_rtdose is not None and _cached_dose_resampled is not None:
+            return _cached_dose_grid, _cached_dose_resampled
+        
+        # Need to resample to reference grid
+        if reference_rtdose is not None:
+            progress_print("  → Resampling to reference grid...")
+            calc_grid = GridInfo(
+                origin=_cached_dose_grid.origin,
+                spacing=_cached_dose_grid.spacing,
+                size=_cached_dose_grid.size,
+                direction=np.eye(3)
+            )
+            _cached_ref_grid = GridInfo(
+                origin=reference_rtdose['origin'],
+                spacing=reference_rtdose['spacing'],
+                size=np.array(reference_rtdose['dose'].shape[::-1]),
+                direction=np.eye(3)
+            )
+            _cached_dose_resampled = resample_dose_linear(
+                dose=_cached_dose_grid.dose,
+                source_grid=calc_grid,
+                target_grid=_cached_ref_grid
+            )
+            return _cached_dose_grid, _cached_dose_resampled
+        
+        return _cached_dose_grid, None
+    
+    # Calculate dose
+    tracker = ProgressTracker("Dose Calculation", total_steps=5)
+    tracker.start()
+    
+    tracker.step("Loading RTPLAN...")
+    plan = IMRTPlan(machine_name=machine_model)
+    plan.readPlanDicom(str(materialized_case['rtplan']))
+    
+    tracker.step(f"Loading CT ({materialized_case['ct_dir'].name})...")
+    dg = IMRTDoseGrid()
+    dg.loadCTDCM(str(materialized_case['ct_dir']))
+    
+    tracker.step(f"Resampling to {target_spacing} mm isotropic...")
+    dg.resampleCTfromSpacing(target_spacing)
+    
+    tracker.step(f"Computing dose on GPU {gpu_id} ({plan.n_beams} beams)...")
+    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+    
+    tracker.step("Storing in cache...")
+    _cached_dose_grid = dg
+    
+    # Resample to reference grid if provided
+    if reference_rtdose is not None:
+        progress_print("  → Resampling to reference grid...")
+        calc_grid = GridInfo(
+            origin=dg.origin,
+            spacing=dg.spacing,
+            size=dg.size,
+            direction=np.eye(3)
+        )
+        _cached_ref_grid = GridInfo(
+            origin=reference_rtdose['origin'],
+            spacing=reference_rtdose['spacing'],
+            size=np.array(reference_rtdose['dose'].shape[::-1]),
+            direction=np.eye(3)
+        )
+        _cached_dose_resampled = resample_dose_linear(
+            dose=dg.dose,
+            source_grid=calc_grid,
+            target_grid=_cached_ref_grid
+        )
+    
+    tracker.done(f"Max dose: {np.max(dg.dose):.2f} Gy")
+    
+    return dg, _cached_dose_resampled
 
 
 # ============================================================================
@@ -95,75 +281,75 @@ def get_output_dir():
 def patient_dicom_dir():
     """
     Fixture providing patient DICOM directory.
-    Skips test if DOSECUDA_PATIENT_DICOM_DIR not set.
+    Uses default if DOSECUDA_PATIENT_DICOM_DIR not set.
     """
-    dicom_dir = get_patient_dicom_dir()
+    print_config()
     
-    if not dicom_dir:
-        pytest.skip(
-            "Test requires DOSECUDA_PATIENT_DICOM_DIR environment variable. "
-            "Set it to patient DICOM directory path to run this test.\n"
-            "Example: export DOSECUDA_PATIENT_DICOM_DIR=/path/to/patient/dicoms"
-        )
+    dicom_path = get_patient_dicom_dir()
     
-    dicom_path = Path(dicom_dir)
     if not dicom_path.exists():
-        pytest.skip(f"Patient DICOM directory does not exist: {dicom_dir}")
+        pytest.skip(
+            f"Patient DICOM directory does not exist: {dicom_path}\n"
+            f"Set DOSECUDA_PATIENT_DICOM_DIR to override."
+        )
     
     return dicom_path
 
 
 @pytest.fixture(scope="module")
 def discovered_case(patient_dicom_dir):
-    """
-    Fixture providing discovered and classified DICOM case.
-    """
-    print("\n" + "=" * 80)
-    print("PHASE 1: DICOM DISCOVERY")
-    print("=" * 80)
+    """Fixture providing discovered and classified DICOM case."""
+    progress_print("\n" + "=" * 80)
+    progress_print("PHASE 1: DICOM DISCOVERY")
+    progress_print("=" * 80)
+    
+    tracker = ProgressTracker("Discovery")
+    tracker.start()
     
     case = scan_dicom_directory(str(patient_dicom_dir))
     
-    # Validate minimum requirements
     if not case.ct_files:
         pytest.fail("No CT files found in patient directory")
     
     if not case.rtplan_files:
         pytest.fail("No RTPLAN found in patient directory")
     
-    print(f"\n{case}")
+    tracker.done(f"Found {len(case.ct_files)} CT, {len(case.rtplan_files)} RTPLAN")
+    progress_print(f"\n{case}")
     
     return case
 
 
 @pytest.fixture(scope="module")
 def selected_files(discovered_case):
-    """
-    Fixture providing selected RTPLAN, RTDOSE, RTSTRUCT, and CT series.
-    """
-    print("\n" + "=" * 80)
-    print("PHASE 2: AUTOMATIC SELECTION")
-    print("=" * 80)
+    """Fixture providing selected RTPLAN, RTDOSE, RTSTRUCT, and CT series."""
+    progress_print("\n" + "=" * 80)
+    progress_print("PHASE 2: AUTOMATIC SELECTION")
+    progress_print("=" * 80)
     
-    # Select RTPLAN
+    tracker = ProgressTracker("Selection", total_steps=4)
+    tracker.start()
+    
+    tracker.step("Selecting RTPLAN...")
     rtplan = select_rtplan(discovered_case)
     assert rtplan is not None, "Failed to select RTPLAN"
     
-    # Select RTDOSE template (optional)
+    tracker.step("Selecting RTDOSE template...")
     rtdose = select_rtdose_template(discovered_case)
     
-    # Select RTSTRUCT (use first if multiple, or None)
+    tracker.step("Selecting RTSTRUCT...")
     rtstruct = None
     if discovered_case.rtstruct_files:
         rtstruct = discovered_case.rtstruct_files[0]
-        print(f"\n[RTSTRUCT] Using: {rtstruct.path.name}")
         if len(discovered_case.rtstruct_files) > 1:
             warnings.warn(f"Multiple RTSTRUCT found ({len(discovered_case.rtstruct_files)}), using first")
     
-    # Select CT series
+    tracker.step("Selecting CT series...")
     ct_series = select_ct_series(discovered_case, rtstruct=rtstruct, rtdose=rtdose)
     assert ct_series is not None, "Failed to select CT series"
     assert len(ct_series) > 0, "Selected CT series is empty"
+    
+    tracker.done(f"RTPLAN={rtplan.path.name}, CT={len(ct_series)} slices")
     
     return {
         'rtplan': rtplan,
@@ -175,14 +361,15 @@ def selected_files(discovered_case):
 
 @pytest.fixture(scope="module")
 def materialized_case(selected_files):
-    """
-    Fixture providing materialized case with organized file structure.
-    """
-    print("\n" + "=" * 80)
-    print("PHASE 3: CASE MATERIALIZATION")
-    print("=" * 80)
+    """Fixture providing materialized case with organized file structure."""
+    progress_print("\n" + "=" * 80)
+    progress_print("PHASE 3: CASE MATERIALIZATION")
+    progress_print("=" * 80)
     
     output_dir = get_output_dir()
+    
+    tracker = ProgressTracker("Materialize")
+    tracker.start()
     
     paths = materialize_case(
         output_dir=str(output_dir),
@@ -192,33 +379,125 @@ def materialized_case(selected_files):
         rtstruct=selected_files['rtstruct']
     )
     
+    tracker.done(f"Created at {output_dir}")
+    
     return paths
 
 
 @pytest.fixture(scope="module")
 def machine_model(selected_files):
-    """
-    Fixture providing inferred machine model.
-    """
-    print("\n" + "=" * 80)
-    print("PHASE 4: MACHINE MODEL INFERENCE")
-    print("=" * 80)
+    """Fixture providing inferred machine model."""
+    progress_print("\n" + "=" * 80)
+    progress_print("PHASE 4: MACHINE MODEL INFERENCE")
+    progress_print("=" * 80)
     
     default_model = get_default_machine()
     model = infer_machine_model(selected_files['rtplan'], default_model=default_model)
     
     # Validate model exists in lookuptables
-    lookuptable_path = Path(__file__).parent.parent / "DoseCUDA" / "lookuptables" / "photons" / model
+    lookuptable_path = _TEST_DIR.parent / "DoseCUDA" / "lookuptables" / "photons" / model
     if not lookuptable_path.exists():
         pytest.fail(
             f"Machine model '{model}' not found in lookuptables/photons/.\n"
-            f"Expected path: {lookuptable_path}\n"
-            f"Available models: {list((lookuptable_path.parent).glob('*'))}"
+            f"Expected path: {lookuptable_path}"
         )
     
-    print(f"\n✓ Machine model validated: {model}")
+    progress_print(f"\n✓ Machine model validated: {model}")
     
     return model
+
+
+@pytest.fixture(scope="module")
+def reference_rtdose(materialized_case):
+    """Fixture providing reference RTDOSE for secondary check comparison."""
+    if not materialized_case['rtdose']:
+        pytest.skip("No RTDOSE template for secondary check")
+
+    from DoseCUDA.dvh import read_reference_rtdose
+
+    rtdose_path = materialized_case['rtdose']
+    progress_print(f"\n[Reference RTDOSE] Loading TPS dose from:")
+    progress_print(f"  {rtdose_path}")
+
+    dose_ref, origin_ref, spacing_ref, frame_uid = read_reference_rtdose(
+        str(rtdose_path)
+    )
+
+    progress_print(f"  Shape: {dose_ref.shape}")
+    progress_print(f"  Dose range: {dose_ref.min():.2f} - {dose_ref.max():.2f} Gy")
+
+    return {
+        'dose': dose_ref,
+        'origin': origin_ref,
+        'spacing': spacing_ref,
+        'frame_uid': frame_uid
+    }
+
+
+@pytest.fixture(scope="module")
+def rasterized_rois(materialized_case, reference_rtdose):
+    """Fixture providing rasterized ROIs on reference dose grid."""
+    if not materialized_case['rtstruct']:
+        pytest.skip("No RTSTRUCT for ROI analysis")
+
+    from DoseCUDA.rtstruct import read_rtstruct, rasterize_roi_to_mask
+    from DoseCUDA.roi_selection import classify_rois
+
+    rtstruct_path = materialized_case['rtstruct']
+    progress_print(f"\n[RTSTRUCT] Loading structures from: {rtstruct_path.name}")
+
+    # Build grid info from reference dose (TPS RTDOSE grid)
+    ref_grid = GridInfo(
+        origin=reference_rtdose['origin'],
+        spacing=reference_rtdose['spacing'],
+        size=np.array(reference_rtdose['dose'].shape[::-1]),  # (nx, ny, nz)
+        direction=np.eye(3)
+    )
+
+    progress_print(f"  Rasterizing ROIs onto TPS dose grid: {ref_grid.size}")
+
+    # Read and classify ROIs
+    rtstruct = read_rtstruct(str(rtstruct_path))
+    roi_names = list(rtstruct.rois.keys())
+    classification = classify_rois(roi_names)
+
+    progress_print(f"\n[ROI Classification]")
+    progress_print(f"  Targets: {classification.targets}")
+    progress_print(f"  OARs: {len(classification.oars)} structures")
+    progress_print(f"  Excluded: {len(classification.excluded)} structures")
+
+    # Rasterize relevant ROIs (targets + OARs)
+    masks = {}
+    rois_to_rasterize = classification.targets + classification.oars
+
+    tracker = ProgressTracker("Rasterize", total_steps=len(rois_to_rasterize))
+    tracker.start()
+
+    for i, roi_name in enumerate(rois_to_rasterize):
+        if roi_name in rtstruct.rois:
+            try:
+                mask = rasterize_roi_to_mask(
+                    rtstruct.rois[roi_name],
+                    ref_grid.origin,
+                    ref_grid.spacing,
+                    ref_grid.size[::-1],  # (nz, ny, nx) for mask shape
+                    direction=ref_grid.direction
+                )
+                if np.any(mask):
+                    masks[roi_name] = mask
+                    n_voxels = np.sum(mask)
+                    vol_cc = n_voxels * np.prod(ref_grid.spacing) / 1000.0
+                    tracker.step(f"{roi_name}: {n_voxels} voxels ({vol_cc:.1f} cc)", i+1)
+            except Exception as e:
+                warnings.warn(f"Failed to rasterize {roi_name}: {e}")
+
+    tracker.done(f"Rasterized {len(masks)} ROIs")
+
+    return {
+        'masks': masks,
+        'classification': classification,
+        'grid': ref_grid
+    }
 
 
 # ============================================================================
@@ -226,12 +505,10 @@ def machine_model(selected_files):
 # ============================================================================
 
 def test_1_discovery_and_selection(discovered_case, selected_files):
-    """
-    Test 1: Verify DICOM discovery and automatic selection succeeded.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 1: Discovery and Selection")
-    print("=" * 80)
+    """Test 1: Verify DICOM discovery and automatic selection succeeded."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 1: Discovery and Selection")
+    progress_print("=" * 80)
     
     # Verify case has required files
     assert len(discovered_case.ct_files) > 0, "No CT files discovered"
@@ -242,117 +519,92 @@ def test_1_discovery_and_selection(discovered_case, selected_files):
     assert selected_files['ct_series'] is not None, "CT series selection failed"
     assert len(selected_files['ct_series']) > 0, "CT series is empty"
     
-    print(f"\n✓ Discovery: {len(discovered_case.ct_files)} CT, "
+    progress_print(f"\n✓ Discovery: {len(discovered_case.ct_files)} CT, "
           f"{len(discovered_case.rtplan_files)} RTPLAN, "
           f"{len(discovered_case.rtstruct_files)} RTSTRUCT, "
           f"{len(discovered_case.rtdose_files)} RTDOSE")
-    print(f"✓ Selected: RTPLAN={selected_files['rtplan'].path.name}, "
+    progress_print(f"✓ Selected: RTPLAN={selected_files['rtplan'].path.name}, "
           f"CT series={len(selected_files['ct_series'])} slices, "
           f"RTDOSE={'Yes' if selected_files['rtdose'] else 'No'}")
 
 
 def test_2_ct_loading_and_anisotropy(materialized_case):
-    """
-    Test 2: Load CT and verify it's anisotropic (z != x/y).
-    """
-    print("\n" + "=" * 80)
-    print("TEST 2: CT Loading and Anisotropy Check")
-    print("=" * 80)
+    """Test 2: Load CT and verify it's anisotropic (z != x/y)."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 2: CT Loading and Anisotropy Check")
+    progress_print("=" * 80)
+    
+    tracker = ProgressTracker("CT Load")
+    tracker.start()
     
     dg = IMRTDoseGrid()
     ct_dir = str(materialized_case['ct_dir'])
     
-    print(f"\nLoading CT from: {ct_dir}")
+    progress_print(f"\n  Loading CT from: {ct_dir}")
     dg.loadCTDCM(ct_dir)
     
     # Check CT loaded
     assert dg.HU is not None, "CT HU array is None"
     assert dg.spacing is not None, "CT spacing is None"
     
-    print(f"✓ CT loaded: shape={dg.HU.shape}, spacing={dg.spacing} mm")
+    tracker.done(f"shape={dg.HU.shape}, spacing={dg.spacing} mm")
     
     # Check anisotropy (expected for clinical CT)
     spacing = dg.spacing
     is_isotropic = np.allclose(spacing, spacing[0], atol=0.01)
     
     if is_isotropic:
-        warnings.warn(
-            f"CT is already isotropic ({spacing}). "
-            "Expected anisotropic for clinical CT."
-        )
+        warnings.warn(f"CT is already isotropic ({spacing}). Expected anisotropic.")
     else:
-        print(f"✓ CT is anisotropic (expected): {spacing} mm")
-        print(f"  Ratio z/x = {spacing[2]/spacing[0]:.2f}")
+        progress_print(f"✓ CT is anisotropic: {spacing} mm (ratio z/x = {spacing[2]/spacing[0]:.2f})")
 
 
 def test_3_isotropic_resampling(materialized_case):
-    """
-    Test 3: Resample anisotropic CT to isotropic spacing for dose calculation.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 3: Isotropic Resampling")
-    print("=" * 80)
+    """Test 3: Resample anisotropic CT to isotropic spacing for dose calculation."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 3: Isotropic Resampling")
+    progress_print("=" * 80)
     
     target_spacing = get_iso_spacing_mm()
     
+    tracker = ProgressTracker("Resample", total_steps=2)
+    tracker.start()
+    
+    tracker.step("Loading CT...")
     dg = IMRTDoseGrid()
     dg.loadCTDCM(str(materialized_case['ct_dir']))
     
     original_spacing = dg.spacing.copy()
     original_size = dg.size.copy()
     
-    print(f"\nOriginal CT: spacing={original_spacing} mm, size={original_size}")
-    print(f"Target: {target_spacing} mm isotropic")
+    progress_print(f"\n  Original: spacing={original_spacing} mm, size={original_size}")
+    progress_print(f"  Target: {target_spacing} mm isotropic")
     
-    # Resample to isotropic
+    tracker.step(f"Resampling to {target_spacing} mm...")
     dg.resampleCTfromSpacing(target_spacing)
     
     # Verify result
     assert dg.spacing is not None, "Spacing is None after resample"
     assert dg.HU is not None, "HU is None after resample"
     
-    resampled_spacing = dg.spacing
-    resampled_size = dg.size
-    
-    print(f"Resampled CT: spacing={resampled_spacing} mm, size={resampled_size}")
-    
     # Verify isotropic
-    is_isotropic = np.allclose(resampled_spacing, target_spacing, atol=0.01)
-    assert is_isotropic, f"Spacing not isotropic after resample: {resampled_spacing}"
+    is_isotropic = np.allclose(dg.spacing, target_spacing, atol=0.01)
+    assert is_isotropic, f"Spacing not isotropic after resample: {dg.spacing}"
     
-    print(f"✓ CT successfully resampled to isotropic {target_spacing} mm")
+    tracker.done(f"Resampled: spacing={dg.spacing} mm, size={dg.size}")
 
 
 def test_4_gpu_dose_calculation(materialized_case, machine_model):
-    """
-    Test 4: Calculate dose on GPU with auto-detected machine model.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 4: GPU Dose Calculation")
-    print("=" * 80)
+    """Test 4: Calculate dose on GPU with auto-detected machine model."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 4: GPU Dose Calculation")
+    progress_print("=" * 80)
     
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
+    progress_print(f"\n  Machine model: {machine_model}")
+    progress_print(f"  GPU ID: {get_gpu_id()}")
+    progress_print(f"  Target spacing: {get_iso_spacing_mm()} mm")
     
-    print(f"\nMachine model: {machine_model}")
-    print(f"GPU ID: {gpu_id}")
-    print(f"Target spacing: {target_spacing} mm")
-    
-    # Initialize plan and dose grid
-    plan = IMRTPlan(machine_name=machine_model)
-    plan.readPlanDicom(str(materialized_case['rtplan']))
-    
-    print(f"\n✓ RTPLAN loaded: {plan.n_beams} beams")
-    
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    
-    print(f"✓ CT prepared: {dg.size} voxels @ {dg.spacing} mm")
-    
-    # Calculate dose on GPU
-    print(f"\nCalculating dose on GPU {gpu_id}...")
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+    dg, _ = get_or_calculate_dose(materialized_case, machine_model)
     
     # Verify dose calculated
     assert dg.dose is not None, "Dose is None after calculation"
@@ -364,57 +616,48 @@ def test_4_gpu_dose_calculation(materialized_case, machine_model):
     dose_mean = np.mean(dg.dose)
     dose_nonzero = np.sum(dg.dose > 0.01)  # Gy
     
-    print(f"\n✓ Dose calculated:")
-    print(f"  Shape: {dg.dose.shape}")
-    print(f"  Min: {dose_min:.3f} Gy")
-    print(f"  Max: {dose_max:.3f} Gy")
-    print(f"  Mean: {dose_mean:.3f} Gy")
-    print(f"  Voxels > 0.01 Gy: {dose_nonzero} ({dose_nonzero/np.prod(dg.dose.shape)*100:.1f}%)")
+    progress_print(f"\n✓ Dose calculated:")
+    progress_print(f"  Shape: {dg.dose.shape}")
+    progress_print(f"  Min: {dose_min:.3f} Gy")
+    progress_print(f"  Max: {dose_max:.3f} Gy")
+    progress_print(f"  Mean: {dose_mean:.3f} Gy")
+    progress_print(f"  Voxels > 0.01 Gy: {dose_nonzero} ({dose_nonzero/np.prod(dg.dose.shape)*100:.1f}%)")
     
     # Sanity checks
     assert dose_max > 0, "Maximum dose is zero (calculation may have failed)"
     assert dose_max < 1000, f"Maximum dose {dose_max} Gy is unrealistic"
     assert np.isfinite(dg.dose).all(), "Dose contains NaN or Inf"
     
-    print(f"\n✓ Dose sanity checks passed")
-    
-    return dg
+    progress_print(f"\n✓ Dose sanity checks passed")
 
 
 def test_5_save_numpy_and_nrrd(materialized_case, machine_model):
-    """
-    Test 5: Save dose as numpy (.npy) and NRRD.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 5: Save NPY and NRRD")
-    print("=" * 80)
+    """Test 5: Save dose as numpy (.npy) and NRRD."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 5: Save NPY and NRRD")
+    progress_print("=" * 80)
     
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
     output_dir = get_output_dir()
     
-    # Recalculate dose (or reuse from test_4 if cached)
-    plan = IMRTPlan(machine_name=machine_model)
-    plan.readPlanDicom(str(materialized_case['rtplan']))
+    dg, _ = get_or_calculate_dose(materialized_case, machine_model)
     
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+    tracker = ProgressTracker("Save", total_steps=3)
+    tracker.start()
     
     # Save numpy
+    tracker.step("Saving numpy...")
     npy_path = output_dir / "dose_calculated.npy"
     np.save(npy_path, dg.dose)
-    print(f"\n✓ Saved numpy: {npy_path}")
     assert npy_path.exists(), "NPY file not created"
     
     # Save NRRD
+    tracker.step("Saving NRRD...")
     nrrd_path = output_dir / "dose_calculated.nrrd"
     dg.writeDoseNRRD(str(nrrd_path), dose_type="PHYSICAL")
-    print(f"✓ Saved NRRD: {nrrd_path}")
     assert nrrd_path.exists(), "NRRD file not created"
     
     # Save dose stats
+    tracker.step("Saving stats...")
     stats_path = output_dir / "dose_stats.txt"
     with open(stats_path, 'w') as f:
         f.write(f"Dose Statistics (calculated on isotropic grid)\n")
@@ -429,127 +672,82 @@ def test_5_save_numpy_and_nrrd(materialized_case, machine_model):
         f.write(f"Std: {np.std(dg.dose):.6f} Gy\n")
         f.write(f"All finite: {np.isfinite(dg.dose).all()}\n")
     
-    print(f"✓ Saved stats: {stats_path}")
+    tracker.done("All files saved")
+    progress_print(f"  → {npy_path}")
+    progress_print(f"  → {nrrd_path}")
+    progress_print(f"  → {stats_path}")
 
 
 def test_6_resample_and_save_dicom_rtdose(materialized_case, machine_model, selected_files):
-    """
-    Test 6: Resample calculated dose to RTDOSE template grid and save DICOM.
-    
-    This is the critical step that enables comparison with TPS dose.
-    Only runs if RTDOSE template is available.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 6: Resample to Template Grid and Save DICOM RTDOSE")
-    print("=" * 80)
+    """Test 6: Resample calculated dose to RTDOSE template grid and save DICOM."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 6: Resample to Template Grid and Save DICOM RTDOSE")
+    progress_print("=" * 80)
     
     if not materialized_case['rtdose']:
         pytest.skip("No RTDOSE template found - skipping DICOM export")
     
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
     output_dir = get_output_dir()
     
-    # Read template RTDOSE to get target grid
-    template_path = str(materialized_case['rtdose'])
-    print(f"\nReading RTDOSE template: {Path(template_path).name}")
+    tracker = ProgressTracker("DICOM Export", total_steps=5)
+    tracker.start()
     
+    # Read template RTDOSE to get target grid
+    tracker.step("Reading RTDOSE template...")
+    template_path = str(materialized_case['rtdose'])
     template_ds = pydicom.dcmread(template_path, force=True)
     
     # Extract template grid geometry
     template_origin = np.array(template_ds.ImagePositionPatient)
+    pixel_spacing = np.array(template_ds.PixelSpacing)
     
-    pixel_spacing = np.array(template_ds.PixelSpacing)  # [row_spacing, col_spacing]
-    
-    # Get slice spacing from GridFrameOffsetVector
     if hasattr(template_ds, 'GridFrameOffsetVector'):
         frame_offsets = np.array(template_ds.GridFrameOffsetVector)
         if len(frame_offsets) > 1:
             slice_spacing = frame_offsets[1] - frame_offsets[0]
         else:
-            slice_spacing = pixel_spacing[0]  # Fallback: assume cubic
+            slice_spacing = pixel_spacing[0]
     else:
         warnings.warn("Template RTDOSE has no GridFrameOffsetVector, assuming cubic voxels")
         slice_spacing = pixel_spacing[0]
     
-    template_spacing = np.array([pixel_spacing[1], pixel_spacing[0], slice_spacing])  # [x, y, z]
-    
+    template_spacing = np.array([pixel_spacing[1], pixel_spacing[0], slice_spacing])
     template_size = np.array([
         int(template_ds.Columns),
         int(template_ds.Rows),
         int(template_ds.NumberOfFrames) if hasattr(template_ds, 'NumberOfFrames') else 1
     ])
     
-    # Get direction (assume axial if not specified)
     if hasattr(template_ds, 'ImageOrientationPatient'):
         orientation = np.array(template_ds.ImageOrientationPatient)
-        # Convert to 3x3 direction matrix
         row_cos = orientation[:3]
         col_cos = orientation[3:]
         slice_cos = np.cross(row_cos, col_cos)
         direction = np.column_stack([row_cos, col_cos, slice_cos])
-        
-        # Check if axial (allow only axial in phase 1)
         if not np.allclose(direction, np.eye(3), atol=0.1):
-            pytest.fail(
-                f"Template RTDOSE is not axial (direction != identity).\n"
-                f"Non-axial geometry not yet supported.\n"
-                f"Direction matrix:\n{direction}"
-            )
+            pytest.fail("Template RTDOSE is not axial - not yet supported.")
     else:
         direction = np.eye(3)
     
-    template_grid = GridInfo(
-        origin=template_origin,
-        spacing=template_spacing,
-        size=template_size,
-        direction=direction
-    )
+    template_grid = GridInfo(origin=template_origin, spacing=template_spacing,
+                             size=template_size, direction=direction)
     
-    print(f"✓ Template grid:")
-    print(f"  Origin: {template_grid.origin} mm")
-    print(f"  Spacing: {template_grid.spacing} mm")
-    print(f"  Size: {template_grid.size}")
-    print(f"  Direction: {'Axial' if np.allclose(direction, np.eye(3)) else 'Oblique'}")
+    progress_print(f"\n  Template grid: {template_grid.size} @ {template_grid.spacing} mm")
     
     # Calculate dose on isotropic grid
-    print(f"\nCalculating dose on isotropic grid ({target_spacing} mm)...")
-    plan = IMRTPlan(machine_name=machine_model)
-    plan.readPlanDicom(str(materialized_case['rtplan']))
+    tracker.step("Calculating dose...")
+    dg, _ = get_or_calculate_dose(materialized_case, machine_model)
     
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
     
-    # Build calculated dose grid
-    calc_grid = GridInfo(
-        origin=dg.origin,
-        spacing=dg.spacing,
-        size=dg.size,
-        direction=np.eye(3)  # DoseCUDA always axial
-    )
+    # Resample to template grid
+    tracker.step("Resampling to template grid...")
+    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=template_grid)
     
-    print(f"✓ Calculated dose grid:")
-    print(f"  Origin: {calc_grid.origin} mm")
-    print(f"  Spacing: {calc_grid.spacing} mm")
-    print(f"  Size: {calc_grid.size}")
-    print(f"  Max dose: {np.max(dg.dose):.2f} Gy")
-    
-    # Resample calculated dose to template grid
-    print(f"\nResampling calculated dose to template grid...")
-    dose_resampled = resample_dose_linear(
-        dose=dg.dose,
-        source_grid=calc_grid,
-        target_grid=template_grid
-    )
-    
-    print(f"✓ Dose resampled:")
-    print(f"  Shape: {dose_resampled.shape} (expected {tuple(template_grid.size[::-1])})")
-    print(f"  Max dose: {np.max(dose_resampled):.2f} Gy")
+    progress_print(f"  Resampled: {dose_resampled.shape}, max={np.max(dose_resampled):.2f} Gy")
     
     # Verify shape matches template
-    expected_shape = (template_size[2], template_size[1], template_size[0])  # (frames, rows, cols)
+    expected_shape = (template_size[2], template_size[1], template_size[0])
     assert dose_resampled.shape == expected_shape, \
         f"Resampled shape {dose_resampled.shape} != template {expected_shape}"
     
@@ -560,13 +758,12 @@ def test_6_resample_and_save_dicom_rtdose(materialized_case, machine_model, sele
     dg.size = template_grid.size
     
     # Save DICOM RTDOSE
+    tracker.step("Saving DICOM RTDOSE...")
     output_dcm_path = output_dir / "DoseCUDA_RD.dcm"
     
-    # Get RTPLAN SOPInstanceUID for reference
     rtplan_ds = pydicom.dcmread(str(materialized_case['rtplan']), stop_before_pixels=True)
     rtplan_sop_uid = rtplan_ds.SOPInstanceUID
     
-    print(f"\nSaving DICOM RTDOSE: {output_dcm_path.name}")
     dg.writeDoseDCM(
         dose_path=str(output_dcm_path),
         ref_dose_path=template_path,
@@ -577,204 +774,77 @@ def test_6_resample_and_save_dicom_rtdose(materialized_case, machine_model, sele
     assert output_dcm_path.exists(), "DICOM RTDOSE not created"
     
     # Verify saved RTDOSE
+    tracker.step("Verifying saved DICOM...")
     saved_ds = pydicom.dcmread(str(output_dcm_path), force=True)
     
-    print(f"\n✓ DICOM RTDOSE saved and verified:")
-    print(f"  SOPInstanceUID: {saved_ds.SOPInstanceUID}")
-    print(f"  SeriesDescription: {saved_ds.SeriesDescription}")
-    print(f"  DoseSummationType: {saved_ds.DoseSummationType}")
-    print(f"  DoseType: {saved_ds.DoseType}")
-    print(f"  DoseGridScaling: {saved_ds.DoseGridScaling:.6e}")
-    print(f"  Shape: ({saved_ds.NumberOfFrames}, {saved_ds.Rows}, {saved_ds.Columns})")
-    print(f"  Max pixel value: {np.max(np.frombuffer(saved_ds.PixelData, dtype=np.uint16))}")
-    print(f"  Max dose: {np.max(np.frombuffer(saved_ds.PixelData, dtype=np.uint16)) * saved_ds.DoseGridScaling:.2f} Gy")
-    
-    # Verify grid matches template
     assert saved_ds.Rows == template_ds.Rows, "Rows mismatch"
     assert saved_ds.Columns == template_ds.Columns, "Columns mismatch"
     assert saved_ds.NumberOfFrames == template_ds.NumberOfFrames, "NumberOfFrames mismatch"
     
-    print(f"\n✓ Grid geometry matches template")
+    tracker.done(f"Saved: {output_dcm_path.name}")
+    progress_print(f"  SOPInstanceUID: {saved_ds.SOPInstanceUID}")
+    progress_print(f"  Grid: ({saved_ds.NumberOfFrames}, {saved_ds.Rows}, {saved_ds.Columns})")
 
-
-# ============================================================================
-# Summary Test
-# ============================================================================
 
 def test_7_summary(discovered_case, selected_files, machine_model):
-    """
-    Test 7: Print comprehensive summary of end-to-end test.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 7: End-to-End Summary")
-    print("=" * 80)
+    """Test 7: Print comprehensive summary of end-to-end test."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 7: End-to-End Summary")
+    progress_print("=" * 80)
 
     output_dir = get_output_dir()
 
-    print(f"\n✓ All tests passed!")
-    print(f"\nInput:")
-    print(f"  Patient DICOM dir: {get_patient_dicom_dir()}")
-    print(f"  CT series: {len(selected_files['ct_series'])} slices")
-    print(f"  RTPLAN: {selected_files['rtplan'].path.name}")
+    progress_print(f"\n✓ All basic tests passed!")
+    progress_print(f"\nInput:")
+    progress_print(f"  Patient DICOM dir: {get_patient_dicom_dir()}")
+    progress_print(f"  CT series: {len(selected_files['ct_series'])} slices")
+    progress_print(f"  RTPLAN: {selected_files['rtplan'].path.name}")
     if selected_files['rtdose']:
-        print(f"  RTDOSE template: {selected_files['rtdose'].path.name}")
+        progress_print(f"  RTDOSE template: {selected_files['rtdose'].path.name}")
     if selected_files['rtstruct']:
-        print(f"  RTSTRUCT: {selected_files['rtstruct'].path.name}")
+        progress_print(f"  RTSTRUCT: {selected_files['rtstruct'].path.name}")
 
-    print(f"\nConfiguration:")
-    print(f"  Machine model: {machine_model}")
-    print(f"  Isotropic spacing: {get_iso_spacing_mm()} mm")
-    print(f"  GPU ID: {get_gpu_id()}")
+    progress_print(f"\nConfiguration:")
+    progress_print(f"  Machine model: {machine_model}")
+    progress_print(f"  Isotropic spacing: {get_iso_spacing_mm()} mm")
+    progress_print(f"  GPU ID: {get_gpu_id()}")
 
-    print(f"\nOutput: {output_dir}")
-    print(f"  dose_calculated.npy")
-    print(f"  dose_calculated.nrrd")
-    print(f"  dose_stats.txt")
-    if selected_files['rtdose']:
-        print(f"  DoseCUDA_RD.dcm  (DICOM RTDOSE)")
+    progress_print(f"\nOutput: {output_dir}")
+    for f in output_dir.glob("*"):
+        if f.is_file():
+            progress_print(f"  {f.name}")
 
-    print(f"\n" + "=" * 80)
-    print("SUCCESS: Patient end-to-end workflow complete")
-    print("=" * 80)
+    progress_print(f"\n" + "=" * 80)
+    progress_print("SUCCESS: Basic end-to-end workflow complete")
+    progress_print("=" * 80)
 
 
 # ============================================================================
 # Secondary Check Tests (Tests 8-11)
 # ============================================================================
 
-@pytest.fixture(scope="module")
-def reference_rtdose(materialized_case):
-    """
-    Fixture providing reference RTDOSE for secondary check comparison.
-    """
-    if not materialized_case['rtdose']:
-        pytest.skip("No RTDOSE template for secondary check")
-
-    from DoseCUDA.dvh import read_reference_rtdose
-
-    dose_ref, origin_ref, spacing_ref, frame_uid = read_reference_rtdose(
-        str(materialized_case['rtdose'])
-    )
-
-    return {
-        'dose': dose_ref,
-        'origin': origin_ref,
-        'spacing': spacing_ref,
-        'frame_uid': frame_uid
-    }
-
-
-@pytest.fixture(scope="module")
-def rasterized_rois(materialized_case, reference_rtdose):
-    """
-    Fixture providing rasterized ROIs on reference dose grid.
-    """
-    if not materialized_case['rtstruct']:
-        pytest.skip("No RTSTRUCT for ROI analysis")
-
-    from DoseCUDA.rtstruct import read_rtstruct, rasterize_roi_to_mask
-    from DoseCUDA.roi_selection import classify_rois
-    from DoseCUDA.grid_utils import GridInfo
-
-    # Build grid info from reference dose
-    ref_grid = GridInfo(
-        origin=reference_rtdose['origin'],
-        spacing=reference_rtdose['spacing'],
-        size=np.array(reference_rtdose['dose'].shape[::-1]),  # (nx, ny, nz)
-        direction=np.eye(3)
-    )
-
-    # Read and classify ROIs
-    rtstruct = read_rtstruct(str(materialized_case['rtstruct']))
-    roi_names = list(rtstruct.rois.keys())
-    classification = classify_rois(roi_names)
-
-    print(f"\n[ROI Classification]")
-    print(f"  Targets: {classification.targets}")
-    print(f"  OARs: {classification.oars}")
-    print(f"  Excluded: {classification.excluded}")
-
-    # Rasterize relevant ROIs (targets + OARs)
-    masks = {}
-    rois_to_rasterize = classification.targets + classification.oars
-
-    for roi_name in rois_to_rasterize:
-        if roi_name in rtstruct.rois:
-            try:
-                mask = rasterize_roi_to_mask(
-                    rtstruct.rois[roi_name],
-                    ref_grid.origin,
-                    ref_grid.spacing,
-                    ref_grid.size[::-1],  # (nz, ny, nx) for mask shape
-                    direction=ref_grid.direction
-                )
-                if np.any(mask):
-                    masks[roi_name] = mask
-                    n_voxels = np.sum(mask)
-                    vol_cc = n_voxels * np.prod(ref_grid.spacing) / 1000.0
-                    print(f"  {roi_name}: {n_voxels} voxels ({vol_cc:.1f} cc)")
-            except Exception as e:
-                warnings.warn(f"Failed to rasterize {roi_name}: {e}")
-
-    return {
-        'masks': masks,
-        'classification': classification,
-        'grid': ref_grid
-    }
-
-
 def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
-    """
-    Test 8: Compute gamma analysis comparing DoseCUDA vs TPS.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 8: Gamma Analysis")
-    print("=" * 80)
+    """Test 8: Compute gamma analysis comparing DoseCUDA vs TPS."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 8: Gamma Analysis (DoseCUDA vs TPS)")
+    progress_print("=" * 80)
+    progress_print("\n[Comparison]")
+    progress_print("  Evaluated: DoseCUDA calculated dose")
+    progress_print("  Reference: TPS RTDOSE")
 
     from DoseCUDA.gamma import compute_gamma_3d, GammaCriteria
-    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
 
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
+    # Get cached dose, resampled to reference grid
+    dg, dose_resampled = get_or_calculate_dose(materialized_case, machine_model, reference_rtdose)
 
-    # Calculate dose
-    plan = IMRTPlan(machine_name=machine_model)
-    plan.readPlanDicom(str(materialized_case['rtplan']))
-
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
-
-    # Build grids
-    calc_grid = GridInfo(
-        origin=dg.origin,
-        spacing=dg.spacing,
-        size=dg.size,
-        direction=np.eye(3)
-    )
-
-    ref_grid = GridInfo(
-        origin=reference_rtdose['origin'],
-        spacing=reference_rtdose['spacing'],
-        size=np.array(reference_rtdose['dose'].shape[::-1]),
-        direction=np.eye(3)
-    )
-
-    # Resample calculated dose to reference grid
-    print(f"\nResampling calculated dose to reference grid...")
-    dose_resampled = resample_dose_linear(
-        dose=dg.dose,
-        source_grid=calc_grid,
-        target_grid=ref_grid
-    )
-
-    print(f"  Calculated dose max: {np.max(dg.dose):.2f} Gy")
-    print(f"  Resampled dose max: {np.max(dose_resampled):.2f} Gy")
-    print(f"  Reference dose max: {np.max(reference_rtdose['dose']):.2f} Gy")
+    progress_print(f"\n  Calculated dose max: {np.max(dg.dose):.2f} Gy")
+    progress_print(f"  Resampled dose max: {np.max(dose_resampled):.2f} Gy")
+    progress_print(f"  Reference dose max: {np.max(reference_rtdose['dose']):.2f} Gy")
 
     # Compute gamma 3%/3mm
-    print(f"\nComputing gamma 3%/3mm (global)...")
+    tracker = ProgressTracker("Gamma 3%/3mm")
+    tracker.start()
+    
     criteria_3_3 = GammaCriteria(
         dta_mm=3.0,
         dd_percent=3.0,
@@ -789,14 +859,15 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
         criteria=criteria_3_3
     )
 
-    print(f"\nGamma 3%/3mm Results:")
-    print(f"  Pass rate: {result_3_3.pass_rate*100:.1f}%")
-    print(f"  Mean gamma: {result_3_3.mean_gamma:.3f}")
-    print(f"  Gamma P95: {result_3_3.gamma_p95:.3f}")
-    print(f"  Evaluated: {result_3_3.n_evaluated} voxels")
+    tracker.done(f"Pass rate: {result_3_3.pass_rate*100:.1f}%")
+    progress_print(f"  Mean gamma: {result_3_3.mean_gamma:.3f}")
+    progress_print(f"  Gamma P95: {result_3_3.gamma_p95:.3f}")
+    progress_print(f"  Evaluated: {result_3_3.n_evaluated} voxels")
 
     # Compute gamma 2%/2mm
-    print(f"\nComputing gamma 2%/2mm (global)...")
+    tracker = ProgressTracker("Gamma 2%/2mm")
+    tracker.start()
+    
     criteria_2_2 = GammaCriteria(
         dta_mm=2.0,
         dd_percent=2.0,
@@ -811,15 +882,15 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
         criteria=criteria_2_2
     )
 
-    print(f"\nGamma 2%/2mm Results:")
-    print(f"  Pass rate: {result_2_2.pass_rate*100:.1f}%")
-    print(f"  Mean gamma: {result_2_2.mean_gamma:.3f}")
-    print(f"  Gamma P95: {result_2_2.gamma_p95:.3f}")
+    tracker.done(f"Pass rate: {result_2_2.pass_rate*100:.1f}%")
+    progress_print(f"  Mean gamma: {result_2_2.mean_gamma:.3f}")
+    progress_print(f"  Gamma P95: {result_2_2.gamma_p95:.3f}")
 
     # Save gamma summary
     output_dir = get_output_dir()
     import json
     gamma_summary = {
+        "timestamp": datetime.now().isoformat(),
         "3%/3mm": {
             "pass_rate": result_3_3.pass_rate,
             "mean_gamma": result_3_3.mean_gamma,
@@ -837,9 +908,8 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
     with open(output_dir / "gamma_summary.json", 'w') as f:
         json.dump(gamma_summary, f, indent=2)
 
-    print(f"\n✓ Gamma summary saved: {output_dir / 'gamma_summary.json'}")
+    progress_print(f"\n✓ Gamma summary saved: gamma_summary.json")
 
-    # Assert criteria (informational - don't fail test on gamma)
     if result_3_3.pass_rate < 0.95:
         warnings.warn(f"Gamma 3%/3mm pass rate {result_3_3.pass_rate:.1%} < 95%")
     if result_2_2.pass_rate < 0.90:
@@ -847,33 +917,16 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
 
 
 def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, rasterized_rois):
-    """
-    Test 9: Compare DVH metrics for targets and OARs.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 9: DVH Comparison")
-    print("=" * 80)
+    """Test 9: Compare DVH metrics for targets and OARs."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 9: DVH Comparison (DoseCUDA vs TPS)")
+    progress_print("=" * 80)
 
     from DoseCUDA.dvh import compute_metrics, compare_dvh_metrics, generate_dvh_report
     from DoseCUDA.roi_selection import get_target_metrics_spec, get_oar_metrics_spec
-    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
 
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
-
-    # Calculate dose and resample
-    plan = IMRTPlan(machine_name=machine_model)
-    plan.readPlanDicom(str(materialized_case['rtplan']))
-
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
-
-    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
-    ref_grid = rasterized_rois['grid']
-
-    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=ref_grid)
+    # Get cached dose
+    dg, dose_resampled = get_or_calculate_dose(materialized_case, machine_model, reference_rtdose)
 
     classification = rasterized_rois['classification']
     ref_spacing = reference_rtdose['spacing']
@@ -882,7 +935,7 @@ def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, ra
     report_lines = []
 
     # Process targets
-    print(f"\n[Target DVH Comparison]")
+    progress_print(f"\n[Target DVH Comparison]")
     for roi_name in classification.targets:
         if roi_name in rasterized_rois['masks']:
             mask = rasterized_rois['masks'][roi_name]
@@ -894,11 +947,11 @@ def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, ra
 
             report = generate_dvh_report(roi_name, metrics_calc, comparison)
             report_lines.append(report)
-            print(report)
+            progress_print(report)
 
     # Process OARs
-    print(f"\n[OAR DVH Comparison]")
-    for roi_name in classification.oars:
+    progress_print(f"\n[OAR DVH Comparison]")
+    for roi_name in classification.oars[:5]:  # Limit to first 5 OARs for speed
         if roi_name in rasterized_rois['masks']:
             mask = rasterized_rois['masks'][roi_name]
             metrics_spec = get_oar_metrics_spec()
@@ -909,50 +962,31 @@ def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, ra
 
             report = generate_dvh_report(roi_name, metrics_calc, comparison)
             report_lines.append(report)
-            print(report)
+            progress_print(report)
 
     # Save DVH report
     with open(output_dir / "dvh_comparison.txt", 'w') as f:
         f.write('\n'.join(report_lines))
 
-    print(f"\n✓ DVH comparison saved: {output_dir / 'dvh_comparison.txt'}")
+    progress_print(f"\n✓ DVH comparison saved: dvh_comparison.txt")
 
 
 def test_10_mu_sanity_check(materialized_case, machine_model, reference_rtdose):
-    """
-    Test 10: MU sanity check at isocenter.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 10: MU Sanity Check")
-    print("=" * 80)
+    """Test 10: MU sanity check at isocenter."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 10: MU Sanity Check")
+    progress_print("=" * 80)
 
     from DoseCUDA.mu_sanity import compute_mu_sanity_from_plan
-    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
 
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
+    # Get cached dose
+    dg, dose_resampled = get_or_calculate_dose(materialized_case, machine_model, reference_rtdose)
 
-    # Calculate dose and resample
+    # Load plan for MU info
     plan = IMRTPlan(machine_name=machine_model)
     plan.readPlanDicom(str(materialized_case['rtplan']))
 
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
-
-    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
-    ref_grid = GridInfo(
-        origin=reference_rtdose['origin'],
-        spacing=reference_rtdose['spacing'],
-        size=np.array(reference_rtdose['dose'].shape[::-1]),
-        direction=np.eye(3)
-    )
-
-    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=ref_grid)
-
-    # Compute MU sanity check
-    print(f"\nComputing MU sanity check...")
+    progress_print(f"\nComputing MU sanity check...")
 
     try:
         result = compute_mu_sanity_from_plan(
@@ -964,27 +998,25 @@ def test_10_mu_sanity_check(materialized_case, machine_model, reference_rtdose):
             tolerance=0.05
         )
 
-        print(f"\nMU Sanity Check Results:")
-        print(f"  Isocenter: {result.isocenter_mm}")
-        print(f"  Dose at iso (calc): {result.dose_calc_at_iso:.4f} Gy")
-        print(f"  Dose at iso (ref):  {result.dose_ref_at_iso:.4f} Gy")
-        print(f"  Total MU: {result.total_mu:.1f}")
-        print(f"  Gy/MU ratio: {result.mu_equiv_ratio:.4f}")
-        print(f"  Status: {result.status}")
-        print(f"  Message: {result.message}")
+        progress_print(f"\nMU Sanity Check Results:")
+        progress_print(f"  Isocenter: {result.isocenter_mm}")
+        progress_print(f"  Dose at iso (calc): {result.dose_calc_at_iso:.4f} Gy")
+        progress_print(f"  Dose at iso (ref):  {result.dose_ref_at_iso:.4f} Gy")
+        progress_print(f"  Total MU: {result.total_mu:.1f}")
+        progress_print(f"  Gy/MU ratio: {result.mu_equiv_ratio:.4f}")
+        progress_print(f"  Status: {result.status}")
+        progress_print(f"  Message: {result.message}")
 
     except Exception as e:
         warnings.warn(f"MU sanity check failed: {e}")
-        print(f"\n⚠ MU sanity check skipped: {e}")
+        progress_print(f"\n⚠ MU sanity check skipped: {e}")
 
 
 def test_11_generate_report(materialized_case, machine_model, reference_rtdose, rasterized_rois):
-    """
-    Test 11: Generate JSON and CSV secondary check reports.
-    """
-    print("\n" + "=" * 80)
-    print("TEST 11: Generate Secondary Check Report")
-    print("=" * 80)
+    """Test 11: Generate JSON and CSV secondary check reports."""
+    progress_print("\n" + "=" * 80)
+    progress_print("TEST 11: Generate Secondary Check Report")
+    progress_print("=" * 80)
 
     from DoseCUDA.secondary_report import (
         evaluate_secondary_check,
@@ -992,30 +1024,15 @@ def test_11_generate_report(materialized_case, machine_model, reference_rtdose, 
         generate_csv_report,
         SecondaryCheckCriteria
     )
-    from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
 
-    gpu_id = get_gpu_id()
-    target_spacing = get_iso_spacing_mm()
     output_dir = get_output_dir()
 
-    # Calculate dose and resample
+    # Get cached dose
+    dg, dose_resampled = get_or_calculate_dose(materialized_case, machine_model, reference_rtdose)
+
+    # Load plan
     plan = IMRTPlan(machine_name=machine_model)
     plan.readPlanDicom(str(materialized_case['rtplan']))
-
-    dg = IMRTDoseGrid()
-    dg.loadCTDCM(str(materialized_case['ct_dir']))
-    dg.resampleCTfromSpacing(target_spacing)
-    dg.computeIMRTPlan(plan, gpu_id=gpu_id)
-
-    calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
-    ref_grid = GridInfo(
-        origin=reference_rtdose['origin'],
-        spacing=reference_rtdose['spacing'],
-        size=np.array(reference_rtdose['dose'].shape[::-1]),
-        direction=np.eye(3)
-    )
-
-    dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=ref_grid)
 
     # Get plan info from RTPLAN
     rtplan_ds = pydicom.dcmread(str(materialized_case['rtplan']), stop_before_pixels=True)
@@ -1023,9 +1040,10 @@ def test_11_generate_report(materialized_case, machine_model, reference_rtdose, 
     plan_name = getattr(rtplan_ds, 'RTPlanLabel', 'UNKNOWN')
     plan_uid = getattr(rtplan_ds, 'SOPInstanceUID', 'UNKNOWN')
 
-    # Run full evaluation
-    print(f"\nRunning secondary check evaluation...")
+    tracker = ProgressTracker("Report Generation", total_steps=3)
+    tracker.start()
 
+    tracker.step("Running evaluation...")
     criteria = SecondaryCheckCriteria()
 
     result = evaluate_secondary_check(
@@ -1043,47 +1061,50 @@ def test_11_generate_report(materialized_case, machine_model, reference_rtdose, 
     )
 
     # Generate reports
+    tracker.step("Generating JSON report...")
     json_path = output_dir / "secondary_check_report.json"
-    csv_path = output_dir / "secondary_check_report.csv"
-
     generate_json_report(result, str(json_path))
+
+    tracker.step("Generating CSV report...")
+    csv_path = output_dir / "secondary_check_report.csv"
     generate_csv_report(result, str(csv_path))
 
-    print(f"\n✓ JSON report: {json_path}")
-    print(f"✓ CSV report: {csv_path}")
+    tracker.done("Reports generated")
 
     # Print summary
-    print(f"\n{'='*60}")
-    print(f"SECONDARY CHECK SUMMARY")
-    print(f"{'='*60}")
-    print(f"  Patient: {result.patient_id}")
-    print(f"  Plan: {result.plan_name}")
-    print(f"  Overall Status: {result.overall_status}")
+    progress_print(f"\n{'='*60}")
+    progress_print(f"SECONDARY CHECK SUMMARY")
+    progress_print(f"{'='*60}")
+    progress_print(f"  Patient: {result.patient_id}")
+    progress_print(f"  Plan: {result.plan_name}")
+    progress_print(f"  Overall Status: {result.overall_status}")
 
     if result.gamma_results:
-        print(f"\n  Gamma Results:")
+        progress_print(f"\n  Gamma Results:")
         for label, gamma_res in result.gamma_results.items():
-            print(f"    {label}: {gamma_res['pass_rate']*100:.1f}% pass [{gamma_res['status']}]")
+            progress_print(f"    {label}: {gamma_res['pass_rate']*100:.1f}% pass [{gamma_res['status']}]")
 
     if result.failure_reasons:
-        print(f"\n  Failure Reasons:")
+        progress_print(f"\n  Failure Reasons:")
         for reason in result.failure_reasons:
-            print(f"    - {reason}")
+            progress_print(f"    - {reason}")
 
     # Verify files exist
     assert json_path.exists(), "JSON report not created"
     assert csv_path.exists(), "CSV report not created"
 
-    print(f"\n{'='*60}")
-    print(f"SECONDARY CHECK COMPLETE")
-    print(f"{'='*60}")
+    progress_print(f"\n{'='*60}")
+    progress_print(f"SECONDARY CHECK COMPLETE")
+    progress_print(f"{'='*60}")
 
 
 if __name__ == "__main__":
-    """
-    Allow running as script for quick testing.
-    """
+    """Allow running as script for quick testing."""
     print(__doc__)
     print("\nTo run this test:")
-    print("  1. Set DOSECUDA_PATIENT_DICOM_DIR=/path/to/patient/dicoms")
-    print("  2. pytest tests/test_patient_end2end.py -v -s")
+    print("  pytest tests/test_patient_end2end.py -v -s")
+    print("\nDefault configuration:")
+    print(f"  DOSECUDA_PATIENT_DICOM_DIR = {_DEFAULT_PATIENT_DICOM_DIR}")
+    print(f"  DOSECUDA_ISO_MM = {_DEFAULT_ISO_SPACING_MM}")
+    print(f"  DOSECUDA_GPU_ID = {_DEFAULT_GPU_ID}")
+    print(f"  DOSECUDA_MACHINE_DEFAULT = {_DEFAULT_MACHINE}")

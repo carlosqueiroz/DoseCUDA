@@ -639,3 +639,109 @@ def materialize_case(
         'rtdose': rtdose_path,
         'rtstruct': rtstruct_path
     }
+
+
+# ============================================================================
+# Multi-phase utilities
+# ============================================================================
+
+@dataclass
+class DicomPhase:
+    """
+    Represents a coherent treatment phase:
+    - one RTPLAN
+    - zero/one RTDOSE that references that plan
+    - optional RTSTRUCT sharing the same FrameOfReferenceUID
+    - CT series chosen for that FrameOfReferenceUID
+    """
+    rtplan: DicomFile
+    ct_series: List[DicomFile]
+    rtdose: Optional[DicomFile] = None
+    rtstruct: Optional[DicomFile] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def enumerate_phases(case: DicomCase) -> List[DicomPhase]:
+    """
+    Build deterministic plan-centric phases without user interaction.
+
+    Matching logic (per RTPLAN):
+    1) RTDOSE: any with ReferencedRTPlanUID == plan.sop_uid; prefer DoseSummationType=PLAN,
+       then largest grid.
+    2) RTSTRUCT: first with same FrameOfReferenceUID.
+    3) CT: series whose FrameOfReferenceUID matches the plan; choose the series
+       with most slices; validate & sort by z.
+
+    Falls back to select_ct_series() if no CT shares the FOR (rare).
+    """
+    phases: List[DicomPhase] = []
+
+    for plan in case.rtplan_files:
+        notes: List[str] = []
+
+        # --- RTDOSE match ---
+        dose_candidates = [
+            d for d in case.rtdose_files
+            if d.referenced_rtplan_uid == plan.sop_uid
+        ]
+        if dose_candidates:
+            plan_doses = [d for d in dose_candidates if d.dose_summation_type == "PLAN"]
+            if plan_doses:
+                rtdose = plan_doses[0]
+            else:
+                # largest grid as tie-breaker
+                dose_candidates.sort(key=lambda d: d.dose_grid_size or 0, reverse=True)
+                rtdose = dose_candidates[0]
+        else:
+            rtdose = None
+            notes.append("No RTDOSE referencing this RTPLAN")
+
+        # --- RTSTRUCT match on FrameOfReferenceUID ---
+        rtstruct_candidates = [
+            s for s in case.rtstruct_files
+            if s.frame_of_reference_uid and s.frame_of_reference_uid == plan.frame_of_reference_uid
+        ]
+        rtstruct = rtstruct_candidates[0] if rtstruct_candidates else None
+        if not rtstruct and case.rtstruct_files:
+            notes.append("RTSTRUCT exists but none share FrameOfReferenceUID with RTPLAN")
+
+        # --- CT series match on FrameOfReferenceUID ---
+        ct_series = _select_ct_series_by_for(case, plan.frame_of_reference_uid)
+        if not ct_series:
+            try:
+                # fallback to existing heuristic using rtstruct/dose hints
+                ct_series = select_ct_series(case, rtstruct=rtstruct, rtdose=rtdose)
+                notes.append("CT selected via fallback heuristics (no FOR match)")
+            except Exception as e:
+                notes.append(f"CT selection failed: {e}")
+                ct_series = []
+
+        phases.append(
+            DicomPhase(
+                rtplan=plan,
+                ct_series=ct_series,
+                rtdose=rtdose,
+                rtstruct=rtstruct,
+                warnings=notes
+            )
+        )
+
+    return phases
+
+
+def _select_ct_series_by_for(case: DicomCase, for_uid: Optional[str]) -> Optional[List[DicomFile]]:
+    """Pick CT series whose FrameOfReferenceUID matches; choose the series with most slices."""
+    if not for_uid:
+        return None
+
+    series = {}
+    for ct in case.ct_files:
+        if ct.frame_of_reference_uid == for_uid:
+            series.setdefault(ct.series_uid, []).append(ct)
+
+    if not series:
+        return None
+
+    # choose the series with most slices
+    _, ct_series = max(series.items(), key=lambda item: len(item[1]))
+    return _validate_and_sort_ct_series(ct_series)

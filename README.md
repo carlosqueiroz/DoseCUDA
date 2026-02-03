@@ -275,17 +275,63 @@ config = ROIClassificationConfig(
 classification = classify_rois(roi_names, config)
 ```
 
-### Running End-to-End Tests
+### Running Tests
+
+**Testes unitários (sem GPU, dados sintéticos):**
 
 ```bash
-# Unit tests (synthetic data, no GPU required)
+# Testes do módulo gamma
 pytest tests/test_gamma_metrics.py -v
+
+# Testes do relatório secundário
 pytest tests/test_secondary_report_smoke.py -v
 
-# End-to-end with patient data (requires GPU and data)
-export DOSECUDA_PATIENT_DICOM_DIR=/path/to/patient
-pytest tests/test_patient_end2end.py -v -s
+# Todos os testes unitários
+pytest tests/test_gamma_metrics.py tests/test_secondary_report_smoke.py -v
 ```
+
+**Teste end-to-end completo (requer GPU + dados DICOM):**
+
+```bash
+# 1. Defina o diretório com dados DICOM do paciente
+#    (deve conter: CT, RTPLAN, RTSTRUCT, RTDOSE do TPS)
+export DOSECUDA_PATIENT_DICOM_DIR=/home/rt/scripts/DoseCUDA/tests/PATIENT/TRUEBEAM
+
+# 2. (Opcional) Configure GPU e espaçamento
+export DOSECUDA_GPU_ID=0           # GPU a usar (default: 0)
+export DOSECUDA_ISO_MM=2.5         # Espaçamento isotrópico em mm (default: 2.5)
+
+# 3. Execute o teste end-to-end
+pytest tests/test_patient_end2end.py -v -s
+
+# Ou execute testes específicos:
+pytest tests/test_patient_end2end.py::test_8_gamma_analysis -v -s
+pytest tests/test_patient_end2end.py::test_9_dvh_comparison -v -s
+pytest tests/test_patient_end2end.py::test_11_generate_report -v -s
+```
+
+**Estrutura esperada do diretório DICOM:**
+
+```
+PATIENT/TRUEBEAM/
+├── CT.1.2.3...dcm         # Slices do CT
+├── CT.1.2.4...dcm
+├── ...
+├── RP.1.2.5...dcm         # RTPLAN
+├── RS.1.2.6...dcm         # RTSTRUCT
+└── RD.1.2.7...dcm         # RTDOSE (referência TPS)
+```
+
+**Saídas geradas (em `tests/test_patient_output/`):**
+
+| Arquivo | Descrição |
+|---------|-----------|
+| `DoseCUDA_RD.dcm` | Dose calculada pelo DoseCUDA |
+| `RTDOSE_template.dcm` | Cópia do RTDOSE TPS (referência) |
+| `secondary_check_report.json` | Relatório completo em JSON |
+| `secondary_check_report.csv` | Relatório em CSV |
+| `gamma_summary.json` | Resumo da análise gamma |
+| `dvh_comparison.txt` | Comparação DVH por ROI |
 
 ### Output Files
 
