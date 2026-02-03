@@ -18,7 +18,7 @@ import warnings
 # Try to import CUDA backend
 _CUDA_AVAILABLE = False
 try:
-    from DoseCUDA.dose_kernels import gamma_3d as _gamma_3d_cuda
+    from DoseCUDA.dose_kernels import gamma_3d_cuda as _gamma_3d_cuda
     from DoseCUDA.dose_kernels import gamma_cuda_available as _check_cuda
     _CUDA_AVAILABLE = _check_cuda()
 except ImportError:
@@ -219,25 +219,26 @@ def _compute_gamma_cuda(
             criteria=criteria.to_dict()
         )
     
-    # Prepare mask
+    # Prepare mask - NOTE: CUDA kernel does NOT support roi_mask yet
+    # If mask is provided, we must fall back to CPU
     if roi_mask is not None:
-        mask = np.ascontiguousarray(roi_mask.astype(np.uint8))
-    else:
-        mask = None
+        warnings.warn("CUDA gamma does not support roi_mask. Falling back to CPU.")
+        return None  # Signal to use CPU fallback
     
     # Call CUDA function
+    # NOTE: kwlist in C is: dose_eval, dose_ref, spacing, dta_mm, dd_percent,
+    #       dose_threshold_percent, global_dose, local, max_gamma, return_map, gpu_id
     try:
         result = _gamma_3d_cuda(
             dose_eval=dose_eval,
             dose_ref=dose_ref,
-            spacing_mm=spacing_mm,
+            spacing=spacing_mm,  # C expects "spacing", not "spacing_mm"
             dta_mm=criteria.dta_mm,
             dd_percent=criteria.dd_percent,
-            local=criteria.local,
             dose_threshold_percent=criteria.dose_threshold_percent,
             global_dose=D_global,
+            local=criteria.local,
             max_gamma=criteria.max_gamma,
-            roi_mask=mask,
             return_map=return_map,
             gpu_id=gpu_id
         )

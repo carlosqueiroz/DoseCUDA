@@ -58,7 +58,9 @@ from DoseCUDA.dicom_case_discovery import (
     select_rtdose_template,
     select_ct_series,
     infer_machine_model,
-    materialize_case
+    materialize_case,
+    enumerate_phases,
+    DicomPhase
 )
 from DoseCUDA.grid_utils import GridInfo, resample_dose_linear
 
@@ -125,6 +127,14 @@ class ProgressTracker:
 def progress_print(msg: str):
     """Print with immediate flush for progress visibility."""
     print(msg)
+    sys.stdout.flush()
+
+
+def print_test_header(title: str):
+    """Print a formatted test header."""
+    print(f"\n{'='*80}")
+    print(title)
+    print(f"{'='*80}")
     sys.stdout.flush()
 
 
@@ -1107,4 +1117,162 @@ if __name__ == "__main__":
     print(f"  DOSECUDA_PATIENT_DICOM_DIR = {_DEFAULT_PATIENT_DICOM_DIR}")
     print(f"  DOSECUDA_ISO_MM = {_DEFAULT_ISO_SPACING_MM}")
     print(f"  DOSECUDA_GPU_ID = {_DEFAULT_GPU_ID}")
+
+
+# ============================================================================
+# Multi-Phase Tests (all treatment phases)
+# ============================================================================
+
+def test_12_enumerate_all_phases(discovered_case):
+    """
+    TEST 12: Enumerate all treatment phases without user interaction.
+    
+    Uses enumerate_phases() to automatically pair RTPLAN with corresponding
+    RTDOSE, RTSTRUCT, and CT series using UIDs.
+    """
+    print_test_header("TEST 12: Enumerate All Treatment Phases")
+    
+    phases = enumerate_phases(discovered_case)
+    
+    progress_print(f"\n✓ Found {len(phases)} treatment phases:")
+    
+    for i, phase in enumerate(phases, 1):
+        progress_print(f"\n--- Phase {i} ---")
+        progress_print(f"  RTPLAN: {phase.rtplan.path.name}")
+        
+        if phase.rtdose:
+            grid_size = phase.rtdose.dose_grid_size or 0
+            grid_mb = grid_size * 4 / (1024**2)  # float32
+            progress_print(f"  RTDOSE: {phase.rtdose.path.name} ({grid_size:,} voxels, ~{grid_mb:.1f} MB)")
+            progress_print(f"    → DoseSummationType: {phase.rtdose.dose_summation_type}")
+        else:
+            progress_print(f"  RTDOSE: None (no TPS reference available)")
+        
+        if phase.rtstruct:
+            progress_print(f"  RTSTRUCT: {phase.rtstruct.path.name}")
+        else:
+            progress_print(f"  RTSTRUCT: None")
+        
+        progress_print(f"  CT: {len(phase.ct_series)} slices")
+        
+        if phase.warnings:
+            for warn in phase.warnings:
+                progress_print(f"  ⚠ {warn}")
+    
+    # Verify we found at least one phase
+    assert len(phases) >= 1, "No treatment phases found"
+    
+    # Verify each phase has CT and RTPLAN
+    for i, phase in enumerate(phases, 1):
+        assert phase.rtplan is not None, f"Phase {i} missing RTPLAN"
+        assert len(phase.ct_series) > 0, f"Phase {i} missing CT series"
+    
+    progress_print(f"\n✓ All {len(phases)} phases have valid RTPLAN and CT")
+
+
+def test_13_calculate_all_phases(discovered_case, materialized_case, machine_model):
+    """
+    TEST 13: Calculate dose for ALL treatment phases.
+    
+    Iterates through enumerate_phases() and calculates dose for each,
+    saving results to separate files.
+    """
+    print_test_header("TEST 13: Calculate All Phases (Multi-Plan)")
+    
+    phases = enumerate_phases(discovered_case)
+    output_dir = get_output_dir()
+    gpu_id = get_gpu_id()
+    target_spacing = get_iso_spacing_mm()
+    
+    progress_print(f"\nCalculating dose for {len(phases)} phases:")
+    progress_print(f"  Target spacing: {target_spacing} mm isotropic")
+    progress_print(f"  GPU ID: {gpu_id}")
+    
+    results = []
+    
+    for i, phase in enumerate(phases, 1):
+        progress_print(f"\n{'='*60}")
+        progress_print(f"PHASE {i}/{len(phases)}: {phase.rtplan.path.stem}")
+        progress_print(f"{'='*60}")
+        
+        tracker = ProgressTracker(f"Phase {i}", total_steps=5)
+        tracker.start()
+        
+        # Load RTPLAN
+        tracker.step("Loading RTPLAN...")
+        plan_model = infer_machine_model(phase.rtplan)  # Pass DicomFile, not str
+        plan = IMRTPlan(machine_name=plan_model)
+        plan.readPlanDicom(str(phase.rtplan.path))
+        
+        # Materialize CT for this phase
+        tracker.step("Preparing CT...")
+        phase_output = output_dir / f"phase_{i}"
+        phase_output.mkdir(exist_ok=True)
+        
+        # Create symlinks to CT
+        ct_dir = phase_output / "CT"
+        ct_dir.mkdir(exist_ok=True)
+        for ct_file in phase.ct_series:
+            link_path = ct_dir / ct_file.path.name
+            if not link_path.exists():
+                link_path.symlink_to(ct_file.path)
+        
+        # Load and resample CT
+        tracker.step(f"Loading CT ({len(phase.ct_series)} slices)...")
+        dg = IMRTDoseGrid()
+        dg.loadCTDCM(str(ct_dir))
+        
+        tracker.step(f"Resampling to {target_spacing} mm...")
+        dg.resampleCTfromSpacing(target_spacing)
+        
+        # Calculate dose
+        tracker.step(f"Computing dose ({plan.n_beams} beams)...")
+        dg.computeIMRTPlan(plan, gpu_id=gpu_id)
+        
+        max_dose = np.max(dg.dose)
+        tracker.done(f"Max dose: {max_dose:.2f} Gy")
+        
+        # Save results
+        npy_path = phase_output / "dose.npy"
+        np.save(npy_path, dg.dose)
+        progress_print(f"  → Saved: {npy_path}")
+        
+        # Store result info
+        phase_result = {
+            'phase': i,
+            'rtplan': phase.rtplan.path.name,
+            'max_dose_gy': max_dose,
+            'shape': dg.dose.shape,
+            'spacing': dg.spacing.tolist(),
+            'has_tps_reference': phase.rtdose is not None
+        }
+        
+        # If TPS reference available, compare
+        if phase.rtdose:
+            ref_rd = pydicom.dcmread(str(phase.rtdose.path))
+            ref_dose = ref_rd.pixel_array * ref_rd.DoseGridScaling
+            phase_result['tps_max_dose_gy'] = float(np.max(ref_dose))
+            phase_result['dose_ratio'] = max_dose / float(np.max(ref_dose)) if np.max(ref_dose) > 0 else 0
+            progress_print(f"  → TPS reference max: {phase_result['tps_max_dose_gy']:.2f} Gy")
+            progress_print(f"  → Ratio (DoseCUDA/TPS): {phase_result['dose_ratio']:.3f}")
+        
+        results.append(phase_result)
+    
+    # Summary
+    progress_print(f"\n{'='*60}")
+    progress_print(f"MULTI-PHASE SUMMARY")
+    progress_print(f"{'='*60}")
+    
+    for r in results:
+        status = "✓" if r['max_dose_gy'] > 0.01 else "⚠"
+        progress_print(f"  {status} Phase {r['phase']}: {r['rtplan']}")
+        progress_print(f"       Max dose: {r['max_dose_gy']:.2f} Gy")
+        if r['has_tps_reference']:
+            progress_print(f"       TPS ref:  {r['tps_max_dose_gy']:.2f} Gy (ratio: {r['dose_ratio']:.3f})")
+    
+    # Verify at least some dose was calculated
+    all_calculated = all(r['max_dose_gy'] > 0 for r in results)
+    assert all_calculated, "Some phases failed to calculate dose"
+    
+    progress_print(f"\n✓ All {len(phases)} phases calculated successfully")
     print(f"  DOSECUDA_MACHINE_DEFAULT = {_DEFAULT_MACHINE}")

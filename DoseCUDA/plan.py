@@ -327,13 +327,23 @@ class DoseGrid:
                 # Clone template
                 ds = pyd.dcmread(ref_dose_path, force=True)
                 
-                # Calculate proper scaling
+                # Calculate proper scaling based on template's bit depth
                 dose_gy = beam_dose * RBE
                 max_dose = np.max(dose_gy)
-                scaling = max(max_dose / 65535.0, 1e-8)  # Avoid divide by zero
                 
-                # Convert to uint16
-                pixels = np.clip(np.rint(dose_gy / scaling), 0, 65535).astype(np.uint16)
+                # Determine pixel type from template
+                bits_allocated = getattr(ds, 'BitsAllocated', 16)
+                if bits_allocated == 32:
+                    max_pixel_value = 2**32 - 1  # uint32
+                    pixel_dtype = np.uint32
+                else:
+                    max_pixel_value = 2**16 - 1  # uint16
+                    pixel_dtype = np.uint16
+                
+                scaling = max(max_dose / max_pixel_value, 1e-10)  # Avoid divide by zero
+                
+                # Convert to appropriate pixel type
+                pixels = np.clip(np.rint(dose_gy / scaling), 0, max_pixel_value).astype(pixel_dtype)
                 
                 # Update DICOM tags
                 ds.PixelData = pixels.tobytes()
@@ -371,13 +381,23 @@ class DoseGrid:
             # Clone template
             ds = pyd.dcmread(ref_dose_path, force=True)
             
-            # Calculate proper scaling
+            # Calculate proper scaling based on template's bit depth
             dose_gy = self.dose * RBE
             max_dose = np.max(dose_gy)
-            scaling = max(max_dose / 65535.0, 1e-8)  # Avoid divide by zero
             
-            # Convert to uint16
-            pixels = np.clip(np.rint(dose_gy / scaling), 0, 65535).astype(np.uint16)
+            # Determine pixel type from template
+            bits_allocated = getattr(ds, 'BitsAllocated', 16)
+            if bits_allocated == 32:
+                max_pixel_value = 2**32 - 1  # uint32
+                pixel_dtype = np.uint32
+            else:
+                max_pixel_value = 2**16 - 1  # uint16
+                pixel_dtype = np.uint16
+            
+            scaling = max(max_dose / max_pixel_value, 1e-10)  # Avoid divide by zero
+            
+            # Convert to appropriate pixel type
+            pixels = np.clip(np.rint(dose_gy / scaling), 0, max_pixel_value).astype(pixel_dtype)
             
             # Update DICOM tags
             ds.PixelData = pixels.tobytes()

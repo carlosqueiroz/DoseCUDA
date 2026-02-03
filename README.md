@@ -41,9 +41,15 @@ gcc --version || clang --version
 2) Recomenda-se um virtualenv isolado (opcional, mas útil):
 
 ```bash
+sudo apt-get install -y cmake
+cd /home/rt/scripts/DoseCUDA
+pip install . --no-build-isolation
+
 python3 -m venv dosecuda-env
 source dosecuda-env/bin/activate
 python -m pip install -U pip setuptools wheel
+
+
 ```
 
 3) Dependências Python (instalar antes do build):

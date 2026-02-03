@@ -1071,6 +1071,43 @@ class IMRTPlan(Plan):
 
             beam_meterset = beam_meterset_map[beam_number]
 
+            # Control points
+            cps = beam.ControlPointSequence if hasattr(beam, 'ControlPointSequence') else []
+
+            # Synthesize CMW if missing/constant/non-monotonic to avoid MU=0 segments
+            if len(cps) == 0:
+                warnings.warn(f"Beam {beam_number}: ControlPointSequence vazia. Pulando feixe.")
+                continue
+
+            cmw_vals = []
+            missing_cmw = False
+            for cp in cps:
+                if hasattr(cp, 'CumulativeMetersetWeight'):
+                    cmw_vals.append(float(cp.CumulativeMetersetWeight))
+                else:
+                    cmw_vals.append(None)
+                    missing_cmw = True
+
+            cmw_numeric = np.array([v for v in cmw_vals if v is not None], dtype=float)
+            all_equal = cmw_numeric.size > 0 and (np.max(cmw_numeric) - np.min(cmw_numeric) < 1e-9)
+            non_monotonic = cmw_numeric.size > 1 and np.any(np.diff(cmw_numeric) < -1e-9)
+            last_too_small = cmw_numeric.size > 0 and cmw_numeric[-1] <= 1e-6
+
+            need_synth = missing_cmw or all_equal or non_monotonic or last_too_small
+
+            if need_synth:
+                n_cps = len(cps)
+                if n_cps == 1:
+                    synth = [1.0]
+                else:
+                    synth = [i / (n_cps - 1) for i in range(n_cps)]
+                for cp, val in zip(cps, synth):
+                    cp.CumulativeMetersetWeight = float(val)
+                warnings.warn(
+                    f"Beam {beam_number}: CumulativeMetersetWeight ausente/constante; "
+                    f"gerando rampa 0→1 com {n_cps} CPs (último={synth[-1]:.3f})."
+                )
+
             # Get FinalCumulativeMetersetWeight with consistency validation
             final_cmw_from_beam = None
             final_cmw_from_cp = None
@@ -1078,8 +1115,8 @@ class IMRTPlan(Plan):
             if hasattr(beam, 'FinalCumulativeMetersetWeight'):
                 final_cmw_from_beam = float(beam.FinalCumulativeMetersetWeight)
             
-            if hasattr(beam, 'ControlPointSequence') and len(beam.ControlPointSequence) > 0:
-                last_cp = beam.ControlPointSequence[-1]
+            if len(cps) > 0:
+                last_cp = cps[-1]
                 if hasattr(last_cp, 'CumulativeMetersetWeight'):
                     final_cmw_from_cp = float(last_cp.CumulativeMetersetWeight)
             
@@ -1115,7 +1152,6 @@ class IMRTPlan(Plan):
             scaling_factor = beam_meterset / final_cmw
 
             # Validate control point sequence
-            cps = beam.ControlPointSequence
             if len(cps) < 2:
                 warnings.warn(f"Beam {beam_number}: menos de 2 control points ({len(cps)}). Pulando feixe.")
                 continue
@@ -1174,9 +1210,19 @@ class IMRTPlan(Plan):
                     raise ValueError(f"Beam {beam_number}, CP {i}: CMW decresce ({cmw_current} -> {cmw_next})")
 
                 seg_mu = delta_cmw * scaling_factor
+                # Debug: log segment MU calculation for troubleshooting small/zero MUs
+                try:
+                    print(f"DEBUG: Beam {beam_number} CP{i} delta_cmw={delta_cmw:.6e} scaling_factor={scaling_factor:.6e} seg_mu={seg_mu:.6e}")
+                except Exception:
+                    pass
 
                 # Skip zero-MU segments (no dose delivered)
                 if seg_mu <= 1e-9:
+                    # Debug: indicate skipped segment
+                    try:
+                        print(f"DEBUG: Skipping beam {beam_number} CP{i} seg_mu={seg_mu:.6e} <= 1e-9")
+                    except Exception:
+                        pass
                     continue
 
                 # Update geometry from current CP (with last-known fallback)

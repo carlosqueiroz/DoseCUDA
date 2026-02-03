@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <stdexcept>
 
 // Maximum search radius in voxels (DTA / min_spacing)
 #define MAX_SEARCH_RADIUS 32
@@ -18,11 +19,6 @@
 #define GAMMA_BLOCK_X 8
 #define GAMMA_BLOCK_Y 8
 #define GAMMA_BLOCK_Z 4
-
-// Shared memory for offset precomputation
-__constant__ int d_offsets[MAX_SEARCH_RADIUS * MAX_SEARCH_RADIUS * MAX_SEARCH_RADIUS * 4 * 3];
-__constant__ float d_offset_distances[MAX_SEARCH_RADIUS * MAX_SEARCH_RADIUS * MAX_SEARCH_RADIUS * 4];
-__constant__ int d_n_offsets;
 
 
 /**
