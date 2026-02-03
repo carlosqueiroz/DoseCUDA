@@ -126,27 +126,36 @@ __device__ float IMRTBeam::headTransmission(const PointXYZ* point_xyz, const flo
 	
 	// ========== ETAPA 1: JAWS (retângulo divergente) ==========
 	float jaw_factor = 1.0f;
-	
+	float jaw_open = 1.0f;
 	if (model.has_xjaws || model.has_yjaws) {
 		// Projetar jaws para plano do voxel
 		const float xLeft_jaw  = ((xjaws[0] * mlc_scale - point_xyz->x) * divergence_scale) + point_xyz->x;
 		const float xRight_jaw = ((xjaws[1] * mlc_scale - point_xyz->x) * divergence_scale) + point_xyz->x;
 		const float yBot_jaw   = ((yjaws[0] * mlc_scale - point_xyz->y) * divergence_scale) + point_xyz->y;
 		const float yTop_jaw   = ((yjaws[1] * mlc_scale - point_xyz->y) * divergence_scale) + point_xyz->y;
-		
+
 		const float exposedSourceX_jaw = 0.5f * (erff(xRight_jaw * invSqrt2_x) - erff(xLeft_jaw * invSqrt2_x));
 		const float exposedSourceY_jaw = 0.5f * (erff(yTop_jaw * invSqrt2_y) - erff(yBot_jaw * invSqrt2_y));
-		
-		jaw_factor = fmaxf(exposedSourceX_jaw * exposedSourceY_jaw, model.jaw_transmission);
+
+		jaw_open = fmaxf(0.0f, exposedSourceX_jaw * exposedSourceY_jaw);
+		// Combine open fraction with jaw transmission (leakage when closed)
+		jaw_factor = jaw_open + (1.0f - jaw_open) * model.jaw_transmission;
 	}
-	
+
 	// ========== ETAPA 2: MLC ==========
-	float mlc_transmission = 0.0f;
+	float leaf_open = 0.0f;
+	bool leaf_found = false;
 
-    for (int i = 0; i < this->n_mlc_pairs; ++i) {
+	for (int i = 0; i < this->n_mlc_pairs; ++i) {
 
-        const float yBottom = (this->mlc[i].y_offset - 0.5f * this->mlc[i].y_width) * mlc_scale;
-        const float yTop    = (this->mlc[i].y_offset + 0.5f * this->mlc[i].y_width) * mlc_scale;
+		const float yBottom = (this->mlc[i].y_offset - 0.5f * this->mlc[i].y_width) * mlc_scale;
+		const float yTop    = (this->mlc[i].y_offset + 0.5f * this->mlc[i].y_width) * mlc_scale;
+
+		// Select only the leaf pair that covers this Y position
+		if (point_xyz->y < yBottom || point_xyz->y > yTop) {
+			continue;
+		}
+		leaf_found = true;
 
 		const float xLeft  = (this->mlc[i].x1 * mlc_scale);
 		const float xRight = (this->mlc[i].x2 * mlc_scale);
@@ -160,12 +169,19 @@ __device__ float IMRTBeam::headTransmission(const PointXYZ* point_xyz, const flo
 		const float exposedSourceX = 0.5f * (erff(tipMLC2 * invSqrt2_x) - erff(tipMLC1 * invSqrt2_x));
 		const float exposedSourceY = 0.5f * (erff(edgeMLC2 * invSqrt2_y) - erff(edgeMLC1 * invSqrt2_y));
 
-		float leaf_open = exposedSourceX * exposedSourceY;
-		mlc_transmission += fmaxf(leaf_open, model.mlc_transmission);
-    }
+		leaf_open = fmaxf(0.0f, exposedSourceX * exposedSourceY);
+		break;
+	}
 
-    // ETAPA 3: COMBINAÇÃO (jaws ∩ MLC)
-    return jaw_factor * mlc_transmission;
+	// If the voxel is outside any leaf pair, treat as blocked by MLC housing
+	if (!leaf_found) {
+		leaf_open = 0.0f;
+	}
+
+	float mlc_factor = leaf_open + (1.0f - leaf_open) * model.mlc_transmission;
+
+	// ETAPA 3: COMBINAÇÃO (jaws ∩ MLC)
+	return jaw_factor * mlc_factor;
 
 }
 
@@ -250,19 +266,37 @@ __global__ void termaKernel(IMRTDose * dose, IMRTBeam * beam, float * TERMAArray
 	float primary_transmission = beam->headTransmission(&vox_head_xyz, beam->model.primary_src_dist, beam->model.primary_src_size);
 	float scatter_transmission = beam->headTransmission(&vox_head_xyz, beam->model.scatter_src_dist, beam->model.scatter_src_size);
 	float wet = dose->WETArray[vox_index];
-	float terma = 0.f;
 	float electron = 0.f;
-	float transmission_ratio = fminf(1.00f, scatter_transmission / primary_transmission);
+
+	// Compute primary and scatter TERMA contributions separately (AAA-like)
+	float terma_primary = 0.0f;
+	float terma_scatter = 0.0f;
 
 	for(int i = 0; i < beam->model.n_spectral_energies; i++){
-		terma += (1.0f - transmission_ratio) * (beam->model.spectrum_primary_weights[i] * expf(-beam->model.spectrum_attenuation_coefficients[i] * wet * off_axis_softening) * sqr(beam->model.primary_src_dist / distance_to_primary_source)) +
-					transmission_ratio * beam->model.spectrum_scatter_weights[i] * expf(-beam->model.spectrum_attenuation_coefficients[i] * wet * off_axis_softening) * (beam->model.scatter_src_dist / distance_to_scatter_source);
+		float mu = beam->model.spectrum_attenuation_coefficients[i];
+		float wP = beam->model.spectrum_primary_weights[i];
+		float wS = beam->model.spectrum_scatter_weights[i];
+
+		float atten = expf(-mu * wet * off_axis_softening);
+
+		// Primary source term: inverse-square and primary weight
+		float prim_term = wP * atten * sqr(beam->model.primary_src_dist / distance_to_primary_source);
+		terma_primary += prim_term;
+
+		// Scatter/extra-focal term: inverse-square from scatter source
+		float scat_term = wS * atten * sqr(beam->model.scatter_src_dist / distance_to_scatter_source);
+		terma_scatter += scat_term;
 	}
 
+	// Combine primary and scatter with respective head transmissions and scatter weight
+	float terma_combined = (1.0f - beam->model.scatter_src_weight) * primary_transmission * terma_primary
+						 + beam->model.scatter_src_weight * scatter_transmission * terma_scatter;
+
+	// Electron contamination (empirical), keep dependence on primary transmission
+	float transmission_ratio = fminf(1.0f, scatter_transmission / fmaxf(primary_transmission, 1e-6f));
 	electron = fmaxf(0.0f, (expf(-beam->model.electron_attenuation * wet) - expf(-beam->model.electron_attenuation * beam->model.electron_fitted_dmax)) / (1.0f - expf(-beam->model.electron_attenuation * beam->model.electron_fitted_dmax)));
 
-	TERMAArray[vox_index] = off_axis_factor * ((1.0f - beam->model.scatter_src_weight) * primary_transmission * terma + beam->model.scatter_src_weight * scatter_transmission * terma);
-
+	TERMAArray[vox_index] = off_axis_factor * terma_combined;
 	ElectronArray[vox_index] = beam->model.electron_src_weight * (0.4f + (0.3f * transmission_ratio)) * electron * primary_transmission;
 
 }
@@ -307,12 +341,32 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 
 	for(int i = 0; i < 6; i++){
 
+		// Select depth-dependent kernel parameters if enabled
+		const float wet_here = dose->WETArray[vox_index]; // g/cm^2
+		const float *kernel_base = beam->model.kernel;
+
+		if (beam->model.use_depth_dependent_kernel && beam->model.kernel_depths != nullptr
+			&& beam->model.kernel_params != nullptr && beam->model.n_kernel_depths > 0) {
+			int bin = lowerBound(beam->model.kernel_depths, beam->model.n_kernel_depths, wet_here);
+			if (bin > 0) { bin -= 1; }
+			bin = min(bin, beam->model.n_kernel_depths - 1);
+			// Each bin holds 6 angles × 4 params
+			kernel_base = beam->model.kernel_params + (bin * 24);
+		}
+
 		float th = beam->model.kernel[i] * CUDART_PI_F / 180.0f;
-		float Am = beam->model.kernel[i + 6];
-		float am = beam->model.kernel[i + 12];
-		float Bm = beam->model.kernel[i + 18];
-		float bm = beam->model.kernel[i + 24];
+		// Depth-dependent parameters override when available
+		float Am = kernel_base ? kernel_base[(beam->model.use_depth_dependent_kernel ? i * 4 + 0 : i + 6)] : 0.0f;
+		float am = kernel_base ? kernel_base[(beam->model.use_depth_dependent_kernel ? i * 4 + 1 : i + 12)] : 0.0f;
+		float Bm = kernel_base ? kernel_base[(beam->model.use_depth_dependent_kernel ? i * 4 + 2 : i + 18)] : 0.0f;
+		float bm = kernel_base ? kernel_base[(beam->model.use_depth_dependent_kernel ? i * 4 + 3 : i + 24)] : 0.0f;
 		float ray_length_init = beam->model.kernel[i + 30];
+		float dir_weight;
+		if (beam->model.kernel_weights != nullptr) {
+			dir_weight = beam->model.kernel_weights[i] / 12.0f; // spread across azimuths
+		} else {
+			dir_weight = 1.0f / (6.0f * 12.0f); // uniform quadrature default
+		}
 
 		const auto sinth = sinf(th), costh = cosf(th);
 
@@ -330,6 +384,8 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 			float Rs = 0.0f, Rp = 0.0f, Ti = 0.0f;
 			float Di = AIR_DENSITY * sp;
 			float ray_length = ray_length_init;
+			float Ti_hist = 0.0f;
+			bool first_sample = true;
 
 			while(ray_length >= 0.0f) {
 
@@ -344,20 +400,34 @@ __global__ void cccKernel(IMRTDose * dose, IMRTBeam * beam, Texture3D TERMATextu
 
 				Di = fmaxf(Di, AIR_DENSITY) * sp;
 
-			// Densidade relativa (água = 1.0 g/cc)
-			float rho_rel = Di / (1.0f * sp);
+				// Optional heterogeneity smoothing (history correction)
+				float Ti_eff;
+				if (beam->model.heterogeneity_alpha > 0.0f) {
+					if (first_sample) {
+						Ti_hist = Ti;
+						first_sample = false;
+					} else {
+						Ti_hist = fmaf(beam->model.heterogeneity_alpha, Ti, (1.0f - beam->model.heterogeneity_alpha) * Ti_hist);
+					}
+					Ti_eff = Ti_hist;
+				} else {
+					Ti_eff = Ti;
+				}
 
-			// Primary: exponencial estável
-			const auto expon_p = expf(-am * Di);
-			Rp = Rp * expon_p + (Ti * sinth * (Am / (am * am)) * (1.0f - expon_p));
-			
-			// Scatter: CORRIGIDO para exponencial estável (não linear)
-			const auto expon_s = expf(-bm * Di * rho_rel);
-			Rs = Rs * expon_s + (Ti * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s) * rho_rel);
+				// Densidade relativa (água = 1.0 g/cc)
+				float rho_rel = Di / (1.0f * sp);
+
+				// Primary: exponencial estável
+				const auto expon_p = expf(-am * Di);
+				Rp = Rp * expon_p + (Ti_eff * sinth * (Am / (am * am)) * (1.0f - expon_p));
+				
+				// Scatter: CORRIGIDO para exponencial estável (não linear)
+				const auto expon_s = expf(-bm * Di * rho_rel);
+				Rs = Rs * expon_s + (Ti_eff * Di * sinth * (Bm / (bm * bm)) * (1.0f - expon_s) * rho_rel);
 
 			}
 
-			dose_value += am * Rp + bm * Rs;
+			dose_value += dir_weight * (am * Rp + bm * Rs);
 
 		}
 	}
@@ -393,7 +463,22 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	DevicePointer<float> d_spectrum_attenuation_coefficients(h_beam->model.spectrum_attenuation_coefficients, h_beam->model.n_spectral_energies);
 	DevicePointer<float> d_spectrum_primary_weights(h_beam->model.spectrum_primary_weights, h_beam->model.n_spectral_energies);
 	DevicePointer<float> d_spectrum_scatter_weights(h_beam->model.spectrum_scatter_weights, h_beam->model.n_spectral_energies);
-	DevicePointer<float> d_kernel(h_beam->model.kernel, 6 * 6);
+	DevicePointer<float> d_kernel(h_beam->model.kernel, h_beam->model.kernel_len);
+	DevicePointer<float> d_kernel_weights;
+	DevicePointer<float> d_kernel_depths;
+	DevicePointer<float> d_kernel_params;
+
+	if (h_beam->model.kernel_weights != nullptr) {
+		d_kernel_weights = DevicePointer<float>(h_beam->model.kernel_weights, 6);
+		d_beam.model.kernel_weights = d_kernel_weights.get();
+	}
+	if (h_beam->model.use_depth_dependent_kernel && h_beam->model.kernel_depths != nullptr && h_beam->model.kernel_params != nullptr) {
+		d_kernel_depths = DevicePointer<float>(h_beam->model.kernel_depths, h_beam->model.n_kernel_depths);
+		// kernel_params length = n_depths * 24 (6 angles * 4 params)
+		d_kernel_params = DevicePointer<float>(h_beam->model.kernel_params, h_beam->model.n_kernel_depths * 24);
+		d_beam.model.kernel_depths = d_kernel_depths.get();
+		d_beam.model.kernel_params = d_kernel_params.get();
+	}
 
 	d_beam.mlc = MLCPairArray.get();
 	d_beam.model.profile_radius = d_profile_radius.get();
@@ -403,6 +488,13 @@ void photon_dose_cuda(int gpu_id, IMRTDose * h_dose, IMRTBeam * h_beam){
 	d_beam.model.spectrum_primary_weights = d_spectrum_primary_weights.get();
 	d_beam.model.spectrum_scatter_weights = d_spectrum_scatter_weights.get();
 	d_beam.model.kernel = d_kernel.get();
+	d_beam.model.kernel_len = h_beam->model.kernel_len;
+	d_beam.model.use_depth_dependent_kernel = h_beam->model.use_depth_dependent_kernel;
+	d_beam.model.n_kernel_depths = h_beam->model.n_kernel_depths;
+	// Default nulls for optional kernel data
+	d_beam.model.kernel_weights = nullptr;
+	d_beam.model.kernel_depths = nullptr;
+	d_beam.model.kernel_params = nullptr;
 
 	// CUDA_CHECK(cudaMemcpyToSymbol(g_kernel, h_kernel, 6 * 6 * sizeof(float)));
 

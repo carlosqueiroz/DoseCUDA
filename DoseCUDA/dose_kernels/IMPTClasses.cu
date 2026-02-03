@@ -195,9 +195,7 @@ __global__ void smoothRayKernel(IMPTDose * dose, CudaBeam * beam, float * Smooth
 		}
 	}
 
-	SmoothedWETArray[vox_index] = conv_wet_sum / (float)n_voxels;
-
-	__syncthreads();
+    SmoothedWETArray[vox_index] = conv_wet_sum / (float)n_voxels;
 
 }
 
@@ -264,9 +262,7 @@ __global__ void pencilBeamKernel(IMPTDose * dose, IMPTBeam * beam){
 
 	}
 
-	atomicAdd(&dose->DoseArray[vox_index], total_dose);
-
-	__syncthreads();
+    atomicAdd(&dose->DoseArray[vox_index], total_dose);
 
 }
 

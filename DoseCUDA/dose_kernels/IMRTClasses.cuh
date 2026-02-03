@@ -52,7 +52,25 @@ class IMRTBeam : public CudaBeam{
             bool has_xjaws;
             bool has_yjaws;
 
+            // Kernel parameters (default depth-invariant):
+            // Stored as 6 angles with layout:
+            // [0..5]=theta, [6..11]=Am, [12..17]=am, [18..23]=Bm, [24..29]=bm, [30..35]=ray_length
             float * kernel;
+            int kernel_len;         // number of floats in kernel array (for safety/copy)
+            // Quadrature weights per polar direction (length 6). When absent, assume equal weights.
+            float * kernel_weights;
+
+            // Optional depth-dependent kernels (P2.2)
+            // kernel_depths: bin lower edges (cm WET); size n_kernel_depths
+            // kernel_params: flattened [n_depths][6 angles][4 params Am,am,Bm,bm]
+            int n_kernel_depths;
+            float * kernel_depths;
+            float * kernel_params;
+            bool use_depth_dependent_kernel;
+
+            // Optional heterogeneity smoothing (P2.4): exponential history filter along ray
+            // 0.0 disables; typical small value 0.2–0.4 to reduce slab artefacts
+            float heterogeneity_alpha;
 
         } model;
 

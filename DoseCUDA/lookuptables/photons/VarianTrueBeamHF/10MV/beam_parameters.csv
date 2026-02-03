@@ -15,3 +15,4 @@ electron_source_weight, 2.0
 electron_fitted_dmax, 1.5
 jaw_transmission, 0.01
 mlc_transmission, 0.02
+dlg, 1.5

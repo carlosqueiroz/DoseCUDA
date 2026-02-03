@@ -384,18 +384,19 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
         return NULL;
 
 	// check beam model properties 
-	double mu_cal, 
-		primary_source_distance, 
-		scatter_source_distance, 
-		primary_source_size, 
-		scatter_source_size, 
-		mlc_distance, 
-		scatter_source_weight, 
-		electron_attenuation, 
-		electron_src_weight,
-		electron_fitted_dmax,
-		jaw_transmission,
-		mlc_transmission;
+double mu_cal, 
+	primary_source_distance, 
+	scatter_source_distance, 
+	primary_source_size, 
+	scatter_source_size, 
+	mlc_distance, 
+	scatter_source_weight, 
+	electron_attenuation, 
+	electron_src_weight,
+	electron_fitted_dmax,
+	jaw_transmission,
+	mlc_transmission,
+	heterogeneity_alpha;
 
 	if (!pyobject_getfloat(model_instance, "mu_calibration", &mu_cal)
 	 || !pyobject_getfloat(model_instance, "primary_source_distance", &primary_source_distance)
@@ -403,14 +404,15 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 	 || !pyobject_getfloat(model_instance, "primary_source_size", &primary_source_size)
 	 || !pyobject_getfloat(model_instance, "scatter_source_size", &scatter_source_size)
 	 || !pyobject_getfloat(model_instance, "mlc_distance", &mlc_distance)
-	 || !pyobject_getfloat(model_instance, "scatter_source_weight", &scatter_source_weight)
-	 || !pyobject_getfloat(model_instance, "electron_attenuation", &electron_attenuation)
-	 || !pyobject_getfloat(model_instance, "electron_source_weight", &electron_src_weight)
-	 || !pyobject_getfloat(model_instance, "electron_fitted_dmax", &electron_fitted_dmax)
-	 || !pyobject_getfloat(model_instance, "jaw_transmission", &jaw_transmission)
-	 || !pyobject_getfloat(model_instance, "mlc_transmission", &mlc_transmission)) {
-		return NULL;
-	}
+ || !pyobject_getfloat(model_instance, "scatter_source_weight", &scatter_source_weight)
+ || !pyobject_getfloat(model_instance, "electron_attenuation", &electron_attenuation)
+ || !pyobject_getfloat(model_instance, "electron_source_weight", &electron_src_weight)
+ || !pyobject_getfloat(model_instance, "electron_fitted_dmax", &electron_fitted_dmax)
+ || !pyobject_getfloat(model_instance, "jaw_transmission", &jaw_transmission)
+ || !pyobject_getfloat(model_instance, "mlc_transmission", &mlc_transmission)
+ || !pyobject_getfloat(model_instance, "heterogeneity_alpha", &heterogeneity_alpha)) {
+	return NULL;
+}
 
 	bool has_xjaws, 
 		has_yjaws;
@@ -425,16 +427,40 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 		*spectrum_attenuation_coefficients, 
 		*spectrum_primary_weights, 
 		*spectrum_scatter_weights, 
-		*kernel;
+		*kernel,
+		*kernel_weights = NULL,
+		*kernel_depths = NULL,
+		*kernel_params = NULL;
 	if (!pyobject_getarray(model_instance, "profile_radius", 1, &profile_radius)
 	 || !pyobject_getarray(model_instance, "profile_intensities", 1, &profile_intensities)
 	 || !pyobject_getarray(model_instance, "profile_softening", 1, &profile_softening)
 	 || !pyobject_getarray(model_instance, "spectrum_attenuation_coefficients", 1, &spectrum_attenuation_coefficients)
 	 || !pyobject_getarray(model_instance, "spectrum_primary_weights", 1, &spectrum_primary_weights)
 	 || !pyobject_getarray(model_instance, "spectrum_scatter_weights", 1, &spectrum_scatter_weights)
-	 || !pyobject_getarray(model_instance, "kernel", 2, &kernel)) {
+	 || !pyobject_getarray(model_instance, "kernel", 1, &kernel)) {
 		return NULL;
 	}
+	// Optional kernel weights (length 6)
+	PyObject *tmp_attr = PyObject_GetAttrString(model_instance, "kernel_weights");
+	if (tmp_attr && PyArray_Check(tmp_attr) && pyarray_typecheck((PyArrayObject*)tmp_attr, 1, NPY_FLOAT)) {
+		kernel_weights = (PyArrayObject*)tmp_attr;
+	} else {
+		Py_XDECREF(tmp_attr);
+	}
+	tmp_attr = PyObject_GetAttrString(model_instance, "kernel_depths");
+	if (tmp_attr && PyArray_Check(tmp_attr) && pyarray_typecheck((PyArrayObject*)tmp_attr, 1, NPY_FLOAT)) {
+		kernel_depths = (PyArrayObject*)tmp_attr;
+	} else {
+		Py_XDECREF(tmp_attr);
+	}
+	tmp_attr = PyObject_GetAttrString(model_instance, "kernel_params");
+	if (tmp_attr && PyArray_Check(tmp_attr) && pyarray_typecheck((PyArrayObject*)tmp_attr, 1, NPY_FLOAT)) {
+		kernel_params = (PyArrayObject*)tmp_attr;
+	} else {
+		Py_XDECREF(tmp_attr);
+	}
+	bool use_depth_dependent_kernel = false;
+	pyobject_getbool(model_instance, "use_depth_dependent_kernel", &use_depth_dependent_kernel);
 
 	// check volume data properties
 	PyArrayObject *density_array, 
@@ -509,14 +535,42 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 		model.scatter_src_size = scatter_source_size;
 		model.mlc_distance = mlc_distance;
 		model.scatter_src_weight = scatter_source_weight;
-		model.electron_attenuation = electron_attenuation;
-		model.electron_src_weight = electron_src_weight;
-		model.kernel = pyarray_as<float>(kernel);
+	model.electron_attenuation = electron_attenuation;
+	model.electron_src_weight = electron_src_weight;
+	model.kernel = pyarray_as<float>(kernel);
+	model.kernel_len = (int)PyArray_SIZE(kernel);
+	model.kernel_weights = nullptr;
+		if (kernel_weights) {
+			model.kernel_weights = pyarray_as<float>(kernel_weights);
+		}
+		model.use_depth_dependent_kernel = use_depth_dependent_kernel;
+		model.n_kernel_depths = 0;
+		model.kernel_depths = nullptr;
+		model.kernel_params = nullptr;
+		if (use_depth_dependent_kernel && kernel_depths && kernel_params) {
+			model.n_kernel_depths = (int)PyArray_DIM(kernel_depths, 0);
+			model.kernel_depths = pyarray_as<float>(kernel_depths);
+			model.kernel_params = pyarray_as<float>(kernel_params);
+		}
 		model.has_xjaws = has_xjaws;
 		model.has_yjaws = has_yjaws;
-		model.electron_fitted_dmax = electron_fitted_dmax;
-		model.jaw_transmission = jaw_transmission;
-		model.mlc_transmission = mlc_transmission;
+
+		// If the control point explicitly contains jaw arrays, trust them and
+		// enable the corresponding flags so headTransmission will apply jaws.
+		if (xjaws_array != NULL) {
+			if (PyArray_DIM(xjaws_array, 0) >= 2) {
+				model.has_xjaws = true;
+			}
+		}
+		if (yjaws_array != NULL) {
+			if (PyArray_DIM(yjaws_array, 0) >= 2) {
+				model.has_yjaws = true;
+			}
+		}
+	model.electron_fitted_dmax = electron_fitted_dmax;
+	model.jaw_transmission = jaw_transmission;
+	model.mlc_transmission = mlc_transmission;
+	model.heterogeneity_alpha = heterogeneity_alpha;
 
 		// dose object
 		IMRTDose dose_obj = IMRTDose(dims, voxel_sp);
@@ -551,6 +605,10 @@ static PyObject * photon_dose(PyObject* self, PyObject* args) {
 		PyObject *return_dose = PyArray_SimpleNewFromData(3, PyArray_DIMS(density_array), PyArray_TYPE(density_array), DoseArray.release());
 
 		PyArray_ENABLEFLAGS((PyArrayObject*) return_dose, NPY_ARRAY_OWNDATA);
+
+		if (kernel_weights) Py_DECREF(kernel_weights);
+		if (kernel_depths) Py_DECREF(kernel_depths);
+		if (kernel_params) Py_DECREF(kernel_params);
 
 		return return_dose;
 

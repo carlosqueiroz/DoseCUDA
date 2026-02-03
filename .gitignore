@@ -38,7 +38,7 @@ install_manifest.txt
 .vscode/
 .idea/
 tests/__pycache__/
-
+rt
 # Test patient data (removido dos commits)
 tests/test_patient_output/
 tests/PATIENT/

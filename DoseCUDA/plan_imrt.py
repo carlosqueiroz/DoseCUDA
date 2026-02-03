@@ -1,4 +1,5 @@
 from .plan import Plan, Beam, DoseGrid, VolumeObject
+from .ct_calibration import CTCalibration, CTCalibrationManager
 import sys
 import os
 sys.path.append(os.path.dirname(__file__))
@@ -44,14 +45,42 @@ class IMRTPhotonEnergy:
         self.mlc_offsets = None
         self.n_mlc_pairs = None
         self.kernel = None
-        
+        self.kernel_len = 0
+        self.kernel_weights = None
+        self.n_kernel_depths = 0
+        self.kernel_depths = None
+        self.kernel_params = None
+
+        # P1.2: Dosimetric Leaf Gap (DLG) correction [mm]
+        # Typical values: 1.0-2.0 mm for Varian MLCs
+        self.dlg = 0.0  # Default: no DLG correction
+        # Tongue-and-groove over-blocking [mm] applied when adjacent leaves
+        # differ in opening (approximate fluence shadowing). Leave 0 to disable.
+        self.tg_ext = 0.0
+
         # FASE 2: Kernel dependente de profundidade
         self.kernel_depths = None  # [0, 5, 10, 15, 20, 25, 30] cm
         self.kernel_params = None  # [n_depths x 24] para 6 ângulos x 4 params
         self.use_depth_dependent_kernel = False
+        # P2.4: suavização opcional de heterogeneidade (filtro exponencial ao longo do raio)
+        self.heterogeneity_alpha = 0.0  # 0 desativa; 0.2-0.4 suaviza interfaces
 
     def validate_parameters(self):
-        """Validate that all required parameters are set"""
+        """
+        Validate beam model parameters (P3.1).
+
+        Performs comprehensive sanity checks:
+        - Required parameters are set
+        - Array lengths match (spectrum, profile)
+        - Parameter ranges are physically valid
+        - Monotonicity constraints are satisfied
+
+        Raises:
+            ValueError: If validation fails with descriptive error
+        """
+        import warnings
+
+        # Required scalar parameters
         required_params = [
             'output_factor_equivalent_squares', 'output_factor_values', 'mu_calibration',
             'primary_source_distance', 'scatter_source_distance', 'mlc_distance',
@@ -59,82 +88,221 @@ class IMRTPhotonEnergy:
             'scatter_source_size', 'profile_radius', 'profile_intensities',
             'profile_softening', 'spectrum_attenuation_coefficients', 'spectrum_primary_weights',
             'spectrum_scatter_weights', 'electron_source_weight', 'has_xjaws', 'has_yjaws',
-            'electron_fitted_dmax', 'jaw_transmission', 'mlc_transmission'
+            'electron_fitted_dmax', 'jaw_transmission', 'mlc_transmission', 'heterogeneity_alpha'
         ]
-        
+
         for param in required_params:
             if getattr(self, param) is None:
-                raise Exception(f"{param} not set in beam model")
+                raise ValueError(f"Beam model '{self.dicom_energy_label}': {param} not set")
+
+        # Array length consistency checks
+        n_spectrum = len(self.spectrum_attenuation_coefficients)
+        if len(self.spectrum_primary_weights) != n_spectrum:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': spectrum_primary_weights length "
+                f"({len(self.spectrum_primary_weights)}) != attenuation coefficients ({n_spectrum})"
+            )
+        if len(self.spectrum_scatter_weights) != n_spectrum:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': spectrum_scatter_weights length "
+                f"({len(self.spectrum_scatter_weights)}) != attenuation coefficients ({n_spectrum})"
+            )
+
+        n_profile = len(self.profile_radius)
+        if len(self.profile_intensities) != n_profile:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': profile_intensities length "
+                f"({len(self.profile_intensities)}) != profile_radius ({n_profile})"
+            )
+        if len(self.profile_softening) != n_profile:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': profile_softening length "
+                f"({len(self.profile_softening)}) != profile_radius ({n_profile})"
+            )
+
+        # Profile radius must be monotonically increasing
+        if not np.all(np.diff(self.profile_radius) > 0):
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': profile_radius must be strictly increasing"
+            )
+
+        # Kernel shape checks
+        if self.kernel is None or self.kernel_len not in (36,):
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': kernel must contain 36 floats (6 angles x 6 columns). "
+                f"Got len={self.kernel_len}"
+            )
+        if self.kernel_weights is not None and len(self.kernel_weights) != 6:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': kernel_weights must have length 6"
+            )
+        if self.kernel_weights is not None:
+            wsum = float(np.sum(self.kernel_weights))
+            if abs(wsum - 1.0) > 0.1:
+                warnings.warn(
+                    f"Beam model '{self.dicom_energy_label}': kernel_weights sum to {wsum:.3f}, "
+                    f"expected ~1.0 for unbiased quadrature."
+                )
+        if self.use_depth_dependent_kernel:
+            if self.kernel_depths is None or self.kernel_params is None:
+                raise ValueError(
+                    f"Beam model '{self.dicom_energy_label}': depth-dependent kernel enabled but data missing"
+                )
+            if self.kernel_params.size != (len(self.kernel_depths) * 24):
+                raise ValueError(
+                    f"Beam model '{self.dicom_energy_label}': kernel_params size "
+                    f"{self.kernel_params.size} != n_depths*24 ({len(self.kernel_depths)*24})"
+                )
+        # heterogeneity_alpha in [0,1)
+        if not (0.0 <= self.heterogeneity_alpha < 1.0 + 1e-6):
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': heterogeneity_alpha "
+                f"({self.heterogeneity_alpha}) must be in [0,1)"
+            )
+
+        # Transmission values in [0, 1]
+        if not (0 <= self.jaw_transmission <= 1):
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': jaw_transmission ({self.jaw_transmission}) "
+                f"must be in [0, 1]"
+            )
+        if not (0 <= self.mlc_transmission <= 1):
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': mlc_transmission ({self.mlc_transmission}) "
+                f"must be in [0, 1]"
+            )
+
+        # Distances must be positive
+        if self.primary_source_distance <= 0:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': primary_source_distance must be positive"
+            )
+        if self.scatter_source_distance <= 0:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': scatter_source_distance must be positive"
+            )
+        if self.mlc_distance < 0:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': mlc_distance must be non-negative"
+            )
+
+        # Tongue-and-groove extension must be non-negative
+        if self.tg_ext < 0:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': tg_ext ({self.tg_ext}) "
+                f"must be >= 0"
+            )
+
+        # Source sizes must be positive
+        if self.primary_source_size <= 0:
+            warnings.warn(
+                f"Beam model '{self.dicom_energy_label}': primary_source_size ({self.primary_source_size}) "
+                f"should be positive for finite source modeling"
+            )
+        if self.scatter_source_size <= 0:
+            warnings.warn(
+                f"Beam model '{self.dicom_energy_label}': scatter_source_size ({self.scatter_source_size}) "
+                f"should be positive for head scatter modeling"
+            )
+
+        # Scatter source weight in [0, 1]
+        if not (0 <= self.scatter_source_weight <= 1):
+            warnings.warn(
+                f"Beam model '{self.dicom_energy_label}': scatter_source_weight ({self.scatter_source_weight}) "
+                f"outside typical range [0, 1]"
+            )
+
+        # MU calibration should be positive
+        if self.mu_calibration <= 0:
+            raise ValueError(
+                f"Beam model '{self.dicom_energy_label}': mu_calibration must be positive"
+            )
+
+    def get_model_hash(self):
+        """
+        Compute a hash of key model parameters for energy uniqueness check.
+
+        Returns:
+            String hash representing the model's key parameters
+        """
+        import hashlib
+
+        # Combine key arrays and scalars into a hashable representation
+        key_data = []
+        key_data.append(self.spectrum_attenuation_coefficients.tobytes())
+        key_data.append(self.spectrum_primary_weights.tobytes())
+        key_data.append(self.kernel.tobytes() if self.kernel is not None else b'')
+        key_data.append(np.float32(self.tg_ext).tobytes())
+        if self.kernel_weights is not None:
+            key_data.append(self.kernel_weights.tobytes())
+        if self.kernel_params is not None:
+            key_data.append(self.kernel_params.tobytes())
+        key_data.append(np.float32(self.heterogeneity_alpha).tobytes())
+        key_data.append(str(self.mu_calibration).encode())
+
+        combined = b''.join(key_data)
+        return hashlib.md5(combined).hexdigest()[:16]
         
     def outputFactor(self, cp):
         """
         Calcula o output factor baseado no campo equivalente.
         
-        Considera interseção de jaws e MLC para geometria real do campo.
-        Valida área e perímetro para evitar divisões por zero ou valores inválidos.
+        Considera interseção de jaws e MLC por folha (geometria real).
+        Usa área efetiva somando aberturas de cada par de folhas dentro das jaws e
+        perímetro aproximado por 2*(largura_média + altura_total), evitando ruído
+        em campos pequenos/VMAT.
         """
         import warnings
         
-        # ========== ETAPA 1: Boundaries do MLC ==========
-        min_y_mlc = 10000.0
-        max_y_mlc = -10000.0
-        min_x_mlc = 10000.0
-        max_x_mlc = -10000.0
-        area_mlc = 0.0
-        
+        # Limites de jaws (ou infinito se não presentes)
+        jaw_xmin = -1e6
+        jaw_xmax = 1e6
+        jaw_ymin = -1e6
+        jaw_ymax = 1e6
+        if getattr(cp, "xjaws", None) is not None:
+            jaw_xmin, jaw_xmax = float(cp.xjaws[0]), float(cp.xjaws[1])
+        if getattr(cp, "yjaws", None) is not None:
+            jaw_ymin, jaw_ymax = float(cp.yjaws[0]), float(cp.yjaws[1])
+
+        area = 0.0
+        min_x = 1e6
+        max_x = -1e6
+        min_y = 1e6
+        max_y = -1e6
+
+        # Soma da área folha a folha, já clipada pelas jaws
         for i in range(cp.mlc.shape[0]):
             x1 = cp.mlc[i, 0]
             x2 = cp.mlc[i, 1]
             y_offset = cp.mlc[i, 2]
             y_width = cp.mlc[i, 3]
 
-            # Acumular área do MLC (ignora gaps <3mm como antes)
-            if (x2 - x1) > 3.0:
-                area_mlc += (x2 - x1) * y_width
-                
-                # Atualizar boundaries X do MLC
-                min_x_mlc = min(min_x_mlc, x1)
-                max_x_mlc = max(max_x_mlc, x2)
-                
-                # Atualizar boundaries Y do MLC
-                min_y_mlc = min(min_y_mlc, y_offset - y_width / 2.0)
-                max_y_mlc = max(max_y_mlc, y_offset + y_width / 2.0)
-        
-        # ========== ETAPA 2: Interseção com JAWS ==========
-        # Se jaws estão definidas, aplicar interseção
-        if hasattr(cp, 'xjaws') and hasattr(cp, 'yjaws'):
-            if cp.xjaws is not None and cp.yjaws is not None:
-                # Interseção: limitar MLC pelas jaws
-                min_x = max(min_x_mlc, cp.xjaws[0])
-                max_x = min(max_x_mlc, cp.xjaws[1])
-                min_y = max(min_y_mlc, cp.yjaws[0])
-                max_y = min(max_y_mlc, cp.yjaws[1])
-                
-                # Se jaws cortam completamente o MLC, campo efetivo pode ser menor
-                if max_x > min_x and max_y > min_y:
-                    # Recomputar área efetiva (aproximação retangular)
-                    area = (max_x - min_x) * (max_y - min_y)
-                    # Limitar pela área do MLC (não pode ser maior)
-                    area = min(area, area_mlc)
-                else:
-                    # Jaws bloqueiam completamente
-                    area = 0.0
-            else:
-                # Jaws None: usar MLC puro
-                min_x = min_x_mlc
-                max_x = max_x_mlc
-                min_y = min_y_mlc
-                max_y = max_y_mlc
-                area = area_mlc
-        else:
-            # Sem jaws: usar MLC puro (backward compatibility)
-            min_x = min_x_mlc
-            max_x = max_x_mlc
-            min_y = min_y_mlc
-            max_y = max_y_mlc
-            area = area_mlc
+            y0 = y_offset - 0.5 * y_width
+            y1 = y_offset + 0.5 * y_width
 
-        # ========== ETAPA 3: Validação e Equivalent Square ==========
+            # Interseção com jaws em Y
+            y_low = max(y0, jaw_ymin)
+            y_high = min(y1, jaw_ymax)
+            if y_high <= y_low:
+                continue
+
+            # Interseção em X
+            x_left = max(x1, jaw_xmin)
+            x_right = min(x2, jaw_xmax)
+            if x_right <= x_left:
+                continue
+
+            dx = x_right - x_left
+            dy = y_high - y_low
+
+            area += dx * dy
+
+            min_x = min(min_x, x_left)
+            max_x = max(max_x, x_right)
+            min_y = min(min_y, y_low)
+            max_y = max(max_y, y_high)
+
+        # ========== Validação e Equivalent Square ==========
         eps = 1e-6
         
         if area < eps:
@@ -145,7 +313,9 @@ class IMRTPhotonEnergy:
             )
             return 0.0
         
-        perimeter = 2 * (max_y - min_y) + 2 * (max_x - min_x)
+        height = max(max_y - min_y, eps)
+        width_mean = area / height
+        perimeter = 2 * (width_mean + height)
         
         if perimeter < eps:
             warnings.warn(
@@ -180,24 +350,59 @@ class IMRTDoseGrid(DoseGrid):
     def __init__(self):
         super().__init__()
         self.Density = []
+        self.ct_calibration = None  # Will hold CTCalibration instance
 
-    def DensityFromHU(self, machine_name):
-                
-        density_table_path = pkg_resources.resource_filename(__name__, os.path.join("lookuptables", "photons", machine_name, "HU_Density.csv"))
-        df_density = pd.read_csv(density_table_path)
-
-        hu_curve = df_density["HU"].to_numpy()
-        density_curve = df_density["Density"].to_numpy()
+    def DensityFromHU(self, machine_name, ct_calibration=None, calibration_name=None):
+        """
+        Convert HU to density using CTCalibration object.
         
-        density = np.array(np.interp(self.HU, hu_curve, density_curve), dtype=np.single)
+        Args:
+            machine_name: Machine name (for legacy CSV lookup)
+            ct_calibration: Optional CTCalibration instance. If None, loads from CSV.
+            calibration_name: Optional calibration curve name (if multiple CSVs available)
+            
+        Returns:
+            density: numpy array of density values [g/cc]
+        """
+        # Use provided calibration or load from CSV
+        if ct_calibration is not None:
+            if not isinstance(ct_calibration, CTCalibration):
+                raise TypeError("ct_calibration deve ser uma instância de CTCalibration")
+            self.ct_calibration = ct_calibration
+        else:
+            # Load calibration(s) from lookuptables (supports multiple curves)
+            machine_dir = pkg_resources.resource_filename(
+                __name__,
+                os.path.join("lookuptables", "photons", machine_name)
+            )
+            manager = CTCalibrationManager()
+            manager.load_from_directory(machine_dir, pattern="HU_Density*.csv")
+
+            if calibration_name is None:
+                # Prefer explicitly named curve if present, else default HU_Density.csv
+                default_name = f"{machine_name}_CT"
+                try:
+                    self.ct_calibration = manager.get_calibration(default_name)
+                except KeyError:
+                    # Fallback to first available
+                    if len(manager.calibrations) == 0:
+                        raise FileNotFoundError(f"Nenhuma curva HU_Density*.csv encontrada em {machine_dir}")
+                    first_name = manager.list_calibrations()[0]
+                    warnings.warn(f"Curva padrão '{default_name}' não encontrada. Usando '{first_name}'.")
+                    self.ct_calibration = manager.get_calibration(first_name)
+            else:
+                self.ct_calibration = manager.get_calibration(calibration_name)
+        
+        # Convert HU to density using calibration object
+        density = self.ct_calibration.convert(self.HU)
         
         return density
 
-    def computeIMRTPlan(self, plan, gpu_id=0):
+    def computeIMRTPlan(self, plan, gpu_id=0, ct_calibration_name=None):
             
         self.beam_doses = []
         self.dose = np.zeros(self.size, dtype=np.single)
-        self.Density = self.DensityFromHU(plan.machine_name)
+        self.Density = self.DensityFromHU(plan.machine_name, calibration_name=ct_calibration_name)
 
         if self.spacing[0] != self.spacing[1] or self.spacing[0] != self.spacing[2]:
             raise Exception("Spacing must be isotropic for IMPT dose calculation - consider resampling CT")
@@ -263,6 +468,39 @@ class IMRTPlan(Plan):
             self._load_beam_model_parameters(beam_model, machine_name, f)
             self.beam_models.append(beam_model)
 
+        # P3.1: Check that different energy models are actually different
+        self._validate_energy_model_uniqueness()
+
+    def _validate_energy_model_uniqueness(self):
+        """
+        Verify that different energy models have distinct parameters (P3.1).
+
+        Identical energy models for different nominal energies indicate
+        a commissioning error and could lead to incorrect dose calculation.
+        """
+        import warnings
+
+        if len(self.beam_models) < 2:
+            return
+
+        # Compute hash for each energy model
+        hashes = {}
+        for model in self.beam_models:
+            model_hash = model.get_model_hash()
+            energy = model.dicom_energy_label
+
+            if model_hash in hashes:
+                other_energy = hashes[model_hash]
+                warnings.warn(
+                    f"⚠ BEAM MODEL WARNING: Energy '{energy}' has identical parameters "
+                    f"to energy '{other_energy}'. This is physically implausible. "
+                    f"Each energy should have unique spectrum, kernel, and calibration. "
+                    f"Check your beam model commissioning data.",
+                    category=UserWarning
+                )
+            else:
+                hashes[model_hash] = energy
+
     def _load_beam_model_parameters(self, beam_model, machine_name, folder_energy_label, mlc_geometry_from_dicom=None):
         """Load beam model parameters from lookup tables
         
@@ -293,7 +531,19 @@ class IMRTPlan(Plan):
         # Load kernel
         kernel_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel.csv"))
         kernel = pd.read_csv(kernel_path)
-        beam_model.kernel = np.array(kernel.to_numpy(), dtype=np.single)
+        # Expect columns: theta, Am, am, Bm, bm, ray_length, weight
+        required_cols = ["theta", "Am", "am", "Bm", "bm", "ray_length"]
+        for col in required_cols:
+            if col not in kernel.columns:
+                raise ValueError(f"kernel.csv missing column '{col}'")
+            beam_model.kernel = np.array(kernel[required_cols].to_numpy().flatten(), dtype=np.single)
+            beam_model.kernel_len = beam_model.kernel.size
+            if "weight" in kernel.columns:
+                beam_model.kernel_weights = np.array(kernel["weight"].to_numpy(), dtype=np.single)
+            else:
+                beam_model.kernel_weights = None
+        # heterogeneity smoothing (optional)
+        beam_model.heterogeneity_alpha = 0.0  # default off; overridden by beam_parameters.csv
         
         # FASE 2: Tentar carregar kernel z-dependente (se existir)
         kernel_zdep_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, folder_energy_label, "kernel_depth_dependent.csv"))
@@ -320,11 +570,14 @@ class IMRTPlan(Plan):
                         kernel_params[i, j*4 + 2] = angle_data["Bm"].values[0]
                         kernel_params[i, j*4 + 3] = angle_data["bm"].values[0]
             
-            beam_model.kernel_params = kernel_params.flatten()  # Linearizar para passar ao CUDA
+            beam_model.kernel_params = kernel_params.flatten().astype(np.single)  # Linearizar para passar ao CUDA
             beam_model.use_depth_dependent_kernel = True
             print(f"✓ Loaded depth-dependent kernel for {folder_energy_label} ({len(depths)} depths)")
         else:
             beam_model.use_depth_dependent_kernel = False
+            beam_model.n_kernel_depths = 0
+            beam_model.kernel_params = None
+            beam_model.kernel_depths = None
 
         # Load machine geometry
         machine_geometry_path = pkg_resources.resource_filename(__name__, os.path.join(path_to_model, "machine_geometry.csv"))
@@ -388,6 +641,15 @@ class IMRTPlan(Plan):
                 beam_model.jaw_transmission = float(line.split(',')[1])
             elif line.startswith('mlc_transmission'):
                 beam_model.mlc_transmission = float(line.split(',')[1])
+            elif line.startswith('dlg'):
+                # P1.2: Dosimetric Leaf Gap [mm]
+                beam_model.dlg = float(line.split(',')[1])
+            elif line.startswith('tg_ext'):
+                # P1.2: Tongue-and-groove over-blocking [mm]
+                beam_model.tg_ext = float(line.split(',')[1])
+            elif line.startswith('heterogeneity_alpha'):
+                # P2.4: history smoothing factor [0..1)
+                beam_model.heterogeneity_alpha = float(line.split(',')[1])
 
     def _normalize_beam_energy(self, nominal_energy):
         """
@@ -457,7 +719,270 @@ class IMRTPlan(Plan):
                 f"Por favor, use apenas feixes com MLC/Jaws."
             )
 
-    def readPlanDicom(self, plan_path):
+    def _extract_mlc_geometry_from_dicom(self, beam):
+        """
+        Extract MLC geometry from DICOM BeamLimitingDeviceSequence (P1.3).
+
+        Reads LeafPositionBoundaries to compute y_offset and y_width for each leaf pair.
+        This provides machine-accurate MLC geometry without relying on CSV.
+
+        Args:
+            beam: DICOM beam object from BeamSequence
+
+        Returns:
+            tuple (n_pairs, offsets, widths) if LeafPositionBoundaries present, else None
+        """
+        import warnings
+
+        if not hasattr(beam, 'BeamLimitingDeviceSequence'):
+            return None
+
+        for device in beam.BeamLimitingDeviceSequence:
+            device_type = getattr(device, 'RTBeamLimitingDeviceType', '')
+
+            if device_type in ('MLCX', 'MLC'):
+                # LeafPositionBoundaries defines edges between leaves (n_pairs + 1 values)
+                if not hasattr(device, 'LeafPositionBoundaries'):
+                    warnings.warn(
+                        f"MLCX device encontrado mas LeafPositionBoundaries ausente. "
+                        f"Usando fallback CSV para geometria MLC."
+                    )
+                    return None
+
+                boundaries = np.array(device.LeafPositionBoundaries, dtype=np.float32)
+                n_boundaries = len(boundaries)
+                n_pairs = n_boundaries - 1
+
+                if n_pairs < 1:
+                    warnings.warn(f"LeafPositionBoundaries inválido: {n_boundaries} valores")
+                    return None
+
+                # Compute y_offset (center of each leaf) and y_width
+                offsets = np.zeros(n_pairs, dtype=np.float32)
+                widths = np.zeros(n_pairs, dtype=np.float32)
+
+                for i in range(n_pairs):
+                    y_bottom = boundaries[i]
+                    y_top = boundaries[i + 1]
+                    offsets[i] = (y_bottom + y_top) / 2.0  # Center position
+                    widths[i] = y_top - y_bottom           # Width
+
+                # Validate: widths should all be positive
+                if np.any(widths <= 0):
+                    warnings.warn(
+                        f"LeafPositionBoundaries produzem larguras negativas/zero. "
+                        f"Verifique se boundaries estão ordenados."
+                    )
+                    return None
+
+                return (n_pairs, offsets, widths)
+
+        # No MLCX device found
+        return None
+
+    def _normalize_energy_for_folder(self, energy_label):
+        """
+        Normalize energy label for folder lookup.
+
+        Maps DICOM energy labels to folder names in lookuptables.
+        Handles variations like "6" vs "6MV" vs "6 MV", FFF variants, etc.
+
+        Args:
+            energy_label: Energy label from DICOM or energy_labels.csv
+
+        Returns:
+            Normalized folder name string
+        """
+        # Convert to string and strip whitespace
+        label = str(energy_label).strip()
+
+        # Remove decimal point for integer values ("6.0" -> "6")
+        if '.' in label:
+            try:
+                val = float(label)
+                if val == int(val):
+                    label = str(int(val))
+            except ValueError:
+                pass
+
+        # Common normalizations
+        label = label.upper().replace(' ', '')
+
+        # Map common DICOM formats to folder names
+        # The folder_energy_label from energy_labels.csv should be used directly
+        # This is just a fallback normalization
+        return label
+
+    def _resample_vmat_control_points(self, cp_list, max_gantry_spacing=2.0):
+        """
+        Resample VMAT control points to finer angular spacing (P1.5).
+
+        For VMAT arcs with large gantry angle intervals, interpolates geometry
+        parameters to improve dose calculation accuracy.
+
+        Args:
+            cp_list: List of IMRTControlPoint objects
+            max_gantry_spacing: Maximum gantry angle spacing in degrees (default 2.0)
+
+        Returns:
+            Resampled list of IMRTControlPoint objects
+        """
+        import warnings
+
+        if len(cp_list) < 2:
+            return cp_list
+
+        # Check if this is a VMAT beam (gantry angles change)
+        gantry_angles = np.array([cp.ga for cp in cp_list])
+        angle_changes = np.abs(np.diff(gantry_angles))
+
+        # Handle wraparound (e.g., 359 -> 1)
+        angle_changes = np.minimum(angle_changes, 360.0 - angle_changes)
+
+        # If no significant gantry motion, return original
+        if np.max(angle_changes) < 0.1:
+            return cp_list
+
+        resampled_cps = []
+        total_original_mu = sum(cp.mu for cp in cp_list)
+
+        for i in range(len(cp_list) - 1):
+            cp1 = cp_list[i]
+            cp2 = cp_list[i + 1]
+
+            # Calculate angle difference
+            ga1, ga2 = cp1.ga, cp2.ga
+            delta_ga = ga2 - ga1
+
+            # Handle wraparound
+            if delta_ga > 180:
+                delta_ga -= 360
+            elif delta_ga < -180:
+                delta_ga += 360
+
+            abs_delta_ga = abs(delta_ga)
+
+            if abs_delta_ga <= max_gantry_spacing or abs_delta_ga < 0.1:
+                # No resampling needed for this interval
+                resampled_cps.append(cp1)
+                continue
+
+            # Number of sub-intervals
+            n_intervals = int(np.ceil(abs_delta_ga / max_gantry_spacing))
+            segment_mu = cp1.mu / n_intervals  # Distribute MU equally
+
+            for j in range(n_intervals):
+                frac = j / n_intervals
+
+                # Interpolate gantry angle
+                new_ga = ga1 + frac * delta_ga
+                if new_ga >= 360:
+                    new_ga -= 360
+                elif new_ga < 0:
+                    new_ga += 360
+
+                # Interpolate other angles
+                new_ca = cp1.ca + frac * (cp2.ca - cp1.ca)
+                new_ta = cp1.ta + frac * (cp2.ta - cp1.ta)
+
+                # Interpolate jaws
+                new_xjaws = cp1.xjaws + frac * (cp2.xjaws - cp1.xjaws) if cp1.xjaws is not None and cp2.xjaws is not None else cp1.xjaws
+                new_yjaws = cp1.yjaws + frac * (cp2.yjaws - cp1.yjaws) if cp1.yjaws is not None and cp2.yjaws is not None else cp1.yjaws
+
+                # Interpolate MLC positions
+                new_mlc = cp1.mlc + frac * (cp2.mlc - cp1.mlc)
+
+                # Create new control point
+                new_cp = IMRTControlPoint(
+                    iso=cp1.iso.copy(),
+                    mu=segment_mu,
+                    mlc=new_mlc,
+                    ga=new_ga,
+                    ca=new_ca,
+                    ta=new_ta,
+                    xjaws=new_xjaws.copy() if new_xjaws is not None else None,
+                    yjaws=new_yjaws.copy() if new_yjaws is not None else None
+                )
+                resampled_cps.append(new_cp)
+
+        # Add the last control point's contribution (if any MU remaining)
+        # Actually, the last CP in the segment list has its MU already distributed
+        # So we don't need to add it again
+
+        total_resampled_mu = sum(cp.mu for cp in resampled_cps)
+
+        # Warn if MU conservation is violated
+        if abs(total_resampled_mu - total_original_mu) > 0.1:
+            warnings.warn(
+                f"VMAT resampling: MU mismatch. Original: {total_original_mu:.2f}, "
+                f"Resampled: {total_resampled_mu:.2f}. Diff: {total_resampled_mu - total_original_mu:.4f}"
+            )
+
+        return resampled_cps
+
+    def _resample_leaf_travel(self, cp_list, max_leaf_motion_mm=1.0):
+        """
+        Resample segments so that maximum leaf/jaw motion between successive CPs
+        is limited (P1.5, sliding-window fidelity).
+
+        Args:
+            cp_list: list of IMRTControlPoint objects (segment MU already set)
+            max_leaf_motion_mm: maximum allowed motion per subdivision
+
+        Returns:
+            new_cp_list with MU conserved
+        """
+        if len(cp_list) < 2:
+            return cp_list
+
+        resampled = []
+        total_mu_before = sum(cp.mu for cp in cp_list)
+
+        for idx in range(len(cp_list) - 1):
+            cp1 = cp_list[idx]
+            cp2 = cp_list[idx + 1]
+
+            # Compute max motion across leaves and jaws
+            max_motion = 0.0
+            if cp1.mlc is not None and cp2.mlc is not None:
+                max_motion = max(max_motion, float(np.max(np.abs(cp2.mlc[:, :2] - cp1.mlc[:, :2]))))
+            if cp1.xjaws is not None and cp2.xjaws is not None:
+                max_motion = max(max_motion, float(np.max(np.abs(cp2.xjaws - cp1.xjaws))))
+            if cp1.yjaws is not None and cp2.yjaws is not None:
+                max_motion = max(max_motion, float(np.max(np.abs(cp2.yjaws - cp1.yjaws))))
+
+            n_parts = int(np.ceil(max_motion / max_leaf_motion_mm)) if max_motion > max_leaf_motion_mm else 1
+            part_mu = cp1.mu / n_parts
+
+            for j in range(n_parts):
+                frac = (j + 0.5) / n_parts  # mid-interval
+                new_mlc = cp1.mlc + frac * (cp2.mlc - cp1.mlc)
+                new_xjaws = cp1.xjaws + frac * (cp2.xjaws - cp1.xjaws) if cp1.xjaws is not None and cp2.xjaws is not None else cp1.xjaws
+                new_yjaws = cp1.yjaws + frac * (cp2.yjaws - cp1.yjaws) if cp1.yjaws is not None and cp2.yjaws is not None else cp1.yjaws
+                new_ga = cp1.ga + frac * (cp2.ga - cp1.ga)
+                new_ca = cp1.ca + frac * (cp2.ca - cp1.ca)
+                new_ta = cp1.ta + frac * (cp2.ta - cp1.ta)
+
+                resampled.append(IMRTControlPoint(
+                    iso=cp1.iso.copy(),
+                    mu=part_mu,
+                    mlc=new_mlc,
+                    ga=new_ga,
+                    ca=new_ca,
+                    ta=new_ta,
+                    xjaws=new_xjaws.copy() if new_xjaws is not None else None,
+                    yjaws=new_yjaws.copy() if new_yjaws is not None else None
+                ))
+
+        total_mu_after = sum(cp.mu for cp in resampled)
+        if abs(total_mu_after - total_mu_before) > 1e-3:
+            import warnings
+            warnings.warn(f"Leaf travel resampling MU mismatch: before {total_mu_before:.3f}, after {total_mu_after:.3f}")
+
+        return resampled
+
+    def readPlanDicom(self, plan_path, vmat_resampling=True, max_gantry_spacing=2.0,
+                      leaf_travel_resampling=True, max_leaf_motion_mm=1.0):
         """
         Read RTPLAN DICOM file and construct beam/control point structures.
 
@@ -468,6 +993,12 @@ class IMRTPlan(Plan):
         - Fallback "last-known" for omitted CP data
         - Validation of unsupported modifiers (wedges, compensators, etc.)
         - Energy normalization for model matching
+        - P1.5: Optional VMAT arc resampling for delivery fidelity
+
+        Args:
+            plan_path: Path to RTPLAN DICOM file
+            vmat_resampling: Enable VMAT control point resampling (default True)
+            max_gantry_spacing: Maximum gantry angle spacing in degrees (default 2.0)
         """
         import warnings
 
@@ -492,7 +1023,7 @@ class IMRTPlan(Plan):
         self.beam_list = []
         self.n_beams = 0
         
-        # P1.5: Variável para armazenar MLC geometry do DICOM (extraída do primeiro beam)
+        # P1.5/P1.3: armazenar geometria MLC do DICOM (primeiro beam que fornecer boundaries)
         mlc_geometry_from_dicom = None
 
         for beam in ds.BeamSequence:
@@ -509,18 +1040,22 @@ class IMRTPlan(Plan):
             # Validar modificadores não suportados (wedges, compensators, etc.)
             self._validate_beam_modifiers(beam, beam_number)
 
-            # P1.5: Extrair MLC geometry do DICOM (se disponível)
-            # Isso é feito uma vez no primeiro beam e reutilizado
-            if self.n_beams == 0 and len(self.beam_models) == 0:
+            # P1.3: Extract MLC geometry from DICOM (primary source). Apply once when first found.
+            if mlc_geometry_from_dicom is None:
                 mlc_geometry_from_dicom = self._extract_mlc_geometry_from_dicom(beam)
                 if mlc_geometry_from_dicom is not None:
-                    # Recarregar beam models com MLC geometry do DICOM
+                    # Reload beam models with DICOM geometry for all energies
                     self.beam_models = []
-                    for energy_label in self.dicom_energy_label:
-                        beam_model = IMRTPhotonEnergy(self.machine_name, energy_label)
-                        folder_energy_label = self._normalize_energy_for_folder(energy_label)
-                        self._load_beam_model_parameters(beam_model, self.machine_name, folder_energy_label, mlc_geometry_from_dicom)
+                    for idx, d_label in enumerate(self.dicom_energy_label):
+                        beam_model = IMRTPhotonEnergy(d_label)
+                        f_label = self.folder_energy_label[idx]
+                        self._load_beam_model_parameters(
+                            beam_model, self.machine_name, f_label, mlc_geometry_from_dicom
+                        )
                         self.beam_models.append(beam_model)
+                else:
+                    # No boundaries found yet; continue with existing models (CSV)
+                    pass
 
             beam_meterset = beam_meterset_map[beam_number]
 
@@ -664,6 +1199,20 @@ class IMRTPlan(Plan):
                 imrt_beam.addControlPoint(control_point)
 
             if imrt_beam.n_cps > 0:
+                # P1.5: Optional leaf-travel resampling for dynamic MLC/sliding window
+                if leaf_travel_resampling and imrt_beam.n_cps > 1:
+                    imrt_beam.cp_list = self._resample_leaf_travel(imrt_beam.cp_list, max_leaf_motion_mm)
+                    imrt_beam.n_cps = len(imrt_beam.cp_list)
+                # P1.5: Apply VMAT resampling if enabled
+                if vmat_resampling and imrt_beam.n_cps > 1:
+                    original_n_cps = imrt_beam.n_cps
+                    imrt_beam.cp_list = self._resample_vmat_control_points(
+                        imrt_beam.cp_list, max_gantry_spacing
+                    )
+                    imrt_beam.n_cps = len(imrt_beam.cp_list)
+                    if imrt_beam.n_cps > original_n_cps:
+                        print(f"  VMAT resampling: {original_n_cps} -> {imrt_beam.n_cps} CPs "
+                              f"(max spacing {max_gantry_spacing}°)")
                 self.addBeam(imrt_beam)
             else:
                 warnings.warn(f"Beam {beam_number}: nenhum segmento com MU > 0. Pulando feixe.")
@@ -757,11 +1306,39 @@ class IMRTPlan(Plan):
                 else:
                     # Poucos invertidos: corrigir silenciosamente
                     mlc[0, :], mlc[1, :] = np.minimum(x1, x2), np.maximum(x1, x2)
-            
+
+            # P1.2: Apply Dosimetric Leaf Gap (DLG) correction
+            # DLG models the rounded leaf ends by shifting leaf tips
+            # x1_eff = x1 - DLG/2 (left leaf retracts to simulate transmission)
+            # x2_eff = x2 + DLG/2 (right leaf retracts)
+            dlg = self.beam_models[0].dlg
+            if dlg > 0:
+                half_dlg = dlg / 2.0
+                mlc[0, :] = mlc[0, :] - half_dlg  # Left bank retracts
+                mlc[1, :] = mlc[1, :] + half_dlg  # Right bank retracts
+                # Ensure x1 <= x2 after DLG correction (for closed leaves)
+                mlc[0, :], mlc[1, :] = np.minimum(mlc[0, :], mlc[1, :]), np.maximum(mlc[0, :], mlc[1, :])
+
+            # Tongue-and-groove approximation: widen leaves near boundaries where
+            # adjacent openings differ, producing extra blocking (shadowing).
+            tg_ext = getattr(self.beam_models[0], "tg_ext", 0.0)
+            tg_threshold = 0.5  # mm difference in opening to trigger TG shadow
+            mlc_widths_eff = mlc_widths.copy()
+            if tg_ext > 0.0:
+                openings = mlc[1, :] - mlc[0, :]
+                for idx in range(n_mlc_pairs - 1):
+                    if abs(openings[idx] - openings[idx + 1]) > tg_threshold:
+                        # Spread the over-blocking equally to the two leaves
+                        mlc_widths_eff[idx] += 0.5 * tg_ext
+                        mlc_widths_eff[idx + 1] += 0.5 * tg_ext
+                mlc_widths_eff = np.clip(mlc_widths_eff, 0.1, None)
+            else:
+                mlc_widths_eff = mlc_widths
+
             mlc = np.array(np.vstack((
                 mlc,
                 mlc_offsets.reshape(1, -1),
-                mlc_widths.reshape(1, -1)
+                mlc_widths_eff.reshape(1, -1)
             )), dtype=np.single)
             mlc = np.transpose(mlc)  # (n_pairs, 4)
         else:
