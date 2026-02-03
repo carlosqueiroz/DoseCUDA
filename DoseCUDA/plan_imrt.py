@@ -2,6 +2,7 @@ from .plan import Plan, Beam, DoseGrid, VolumeObject
 from .ct_calibration import CTCalibration, CTCalibrationManager
 import sys
 import os
+import logging
 sys.path.append(os.path.dirname(__file__))
 import numpy as np
 import pandas as pd
@@ -13,6 +14,13 @@ try:
 except ModuleNotFoundError:
     from DoseCUDA import dose_kernels
 from dataclasses import dataclass
+
+
+logger = logging.getLogger(__name__)
+
+# MU handling tolerances
+_MIN_SEG_MU_ABS = 1e-12          # Gy-equivalent MU floor (absolute)
+_MIN_SEG_MU_REL = 1e-6           # Relative to BeamMeterset (per segment)
 
 @dataclass
 class IMRTPhotonEnergy:
@@ -551,7 +559,21 @@ class IMRTPlan(Plan):
         beam_model.kernel_len = beam_model.kernel.size
 
         if "weight" in kernel.columns:
-            beam_model.kernel_weights = np.array(kernel["weight"].to_numpy(), dtype=np.single)
+            weights = np.array(kernel["weight"].to_numpy(), dtype=np.single)
+            wsum = float(np.sum(weights))
+            if wsum <= 0:
+                warnings.warn(
+                    f"Kernel weights for {folder_energy_label} sum to {wsum:.3f}; "
+                    f"disabling directional weighting."
+                )
+                beam_model.kernel_weights = None
+            else:
+                if abs(wsum - 1.0) > 1e-3:
+                    warnings.warn(
+                        f"Kernel weights for {folder_energy_label} sum to {wsum:.3f}; "
+                        f"normalizing to 1.0."
+                    )
+                beam_model.kernel_weights = (weights / wsum).astype(np.single)
         else:
             beam_model.kernel_weights = None
         # heterogeneity smoothing (optional)
@@ -1197,6 +1219,10 @@ class IMRTPlan(Plan):
             last_xjaws, last_yjaws, last_mlc_raw = self._parse_beam_limiting_devices(first_cp)
 
             # Process segments: segment i uses geometry from CP[i] and MU from delta to CP[i+1]
+            skipped_small_mu = 0
+            total_segments = max(len(cps) - 1, 0)
+            skip_floor = max(_MIN_SEG_MU_ABS, beam_meterset * _MIN_SEG_MU_REL)
+
             for i in range(len(cps) - 1):
                 cp = cps[i]
                 cp_next = cps[i + 1]
@@ -1210,19 +1236,22 @@ class IMRTPlan(Plan):
                     raise ValueError(f"Beam {beam_number}, CP {i}: CMW decresce ({cmw_current} -> {cmw_next})")
 
                 seg_mu = delta_cmw * scaling_factor
-                # Debug: log segment MU calculation for troubleshooting small/zero MUs
-                try:
-                    print(f"DEBUG: Beam {beam_number} CP{i} delta_cmw={delta_cmw:.6e} scaling_factor={scaling_factor:.6e} seg_mu={seg_mu:.6e}")
-                except Exception:
-                    pass
 
-                # Skip zero-MU segments (no dose delivered)
-                if seg_mu <= 1e-9:
-                    # Debug: indicate skipped segment
-                    try:
-                        print(f"DEBUG: Skipping beam {beam_number} CP{i} seg_mu={seg_mu:.6e} <= 1e-9")
-                    except Exception:
-                        pass
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "Beam %s CP%d delta_cmw=%.6e scaling_factor=%.6e seg_mu=%.6e "
+                        "(skip_floor=%.3e)",
+                        beam_number, i, delta_cmw, scaling_factor, seg_mu, skip_floor
+                    )
+
+                # Skip near-zero MU segments using absolute + relative floor
+                if seg_mu <= skip_floor:
+                    skipped_small_mu += 1
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "Skipping beam %s CP%d seg_mu=%.6e <= floor %.3e",
+                            beam_number, i, seg_mu, skip_floor
+                        )
                     continue
 
                 # Update geometry from current CP (with last-known fallback)
@@ -1255,6 +1284,12 @@ class IMRTPlan(Plan):
                     last_xjaws, last_yjaws
                 )
                 imrt_beam.addControlPoint(control_point)
+
+            if skipped_small_mu:
+                logger.info(
+                    "Beam %s: skipped %d/%d segments with MU <= %.3e",
+                    beam_number, skipped_small_mu, total_segments, skip_floor
+                )
 
             if imrt_beam.n_cps > 0:
                 # P1.5: Optional leaf-travel resampling for dynamic MLC/sliding window

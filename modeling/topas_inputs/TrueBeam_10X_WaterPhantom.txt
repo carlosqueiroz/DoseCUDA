@@ -1,0 +1,57 @@
+# Lê o PHSP da IAEA (TrueBeam v2 10X) e calcula DoseToWater em um fantoma de água voxelizado.
+# Ajuste NumberOfHistoriesInRun conforme precisão desejada.
+
+# ----------------------
+# Execução / Run
+# ----------------------
+i:Ts/Run/NumberOfThreads = 8
+i:Ts/Run/Seed = 123456
+
+# ----------------------
+# Mundo
+# ----------------------
+s:Ge/World/Type      = "TsBox"
+s:Ge/World/Material  = "G4_AIR"
+d:Ge/World/HLX       = 250. cm
+d:Ge/World/HLY       = 250. cm
+d:Ge/World/HLZ       = 250. cm
+b:Ge/World/Invisible = "TRUE"
+
+# ----------------------
+# Fonte: Phase Space IAEA
+# ----------------------
+s:So/Phsp/Type               = "PhaseSpace"
+s:So/Phsp/Component          = "World"
+# Caminho base (sem extensão). Espera encontrar .header e .phsp
+s:So/Phsp/PhaseSpaceFileName = "/phsp/VarianTrueBeam_v2/10X/TrueBeam_v2_10X_00"
+b:So/Phsp/PhaseSpacePreCheck = "False"
+i:So/Phsp/PhaseSpaceMultipleUse = 0          # 0 = usar arquivo inteiro uma vez
+i:So/Phsp/NumberOfHistoriesInRun = 2000000   # ajuste para convergência
+
+# ----------------------
+# Fantoma de água (40x40x40 cm³) — face superior em Z=0
+# ----------------------
+s:Ge/WaterPhantom/Parent   = "World"
+s:Ge/WaterPhantom/Type     = "TsBox"
+s:Ge/WaterPhantom/Material = "G4_WATER"
+d:Ge/WaterPhantom/HLX      = 20. cm
+d:Ge/WaterPhantom/HLY      = 20. cm
+d:Ge/WaterPhantom/HLZ      = 20. cm
+d:Ge/WaterPhantom/TransZ   = -20. cm
+i:Ge/WaterPhantom/XBins    = 80        # 5 mm voxels
+i:Ge/WaterPhantom/YBins    = 80
+i:Ge/WaterPhantom/ZBins    = 80
+
+# ----------------------
+# Física
+# ----------------------
+s:Ph/Default/PhysicsList = "QGSP_BERT_EMZ"
+
+# ----------------------
+# Scoring: DoseToWater → CSV em /output
+# ----------------------
+s:Sc/Dose/Quantity                  = "DoseToWater"
+s:Sc/Dose/Component                 = "WaterPhantom"
+s:Sc/Dose/OutputType                = "CSV"
+s:Sc/Dose/OutputFile                = "dose_water.csv"
+s:Sc/Dose/IfOutputFileAlreadyExists = "Overwrite"

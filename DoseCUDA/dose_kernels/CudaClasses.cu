@@ -199,9 +199,10 @@ __global__ void rayTraceKernel(CudaDose * dose, CudaBeam * beam, Texture3D Densi
 	PointXYZ vox_ray_xyz, tex_xyz;
 
     float ray_length = 0.0f;
-    float wet_sum = -0.05f;
     float density = 0.0f;
-	const float step_length = 1.0f;
+	const float step_length = dose->spacing;  // Use grid spacing for consistency with CCC
+    // Initialize WET with half-step correction for midpoint integration
+    float wet_sum = -0.5f * step_length / 10.0f;
 
     while(true){
 

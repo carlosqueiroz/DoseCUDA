@@ -22,10 +22,18 @@ struct GammaParams {
     float global_dose;               // Reference dose for global normalization
     float max_gamma;                 // Cap gamma values at this max
     bool local_normalization;        // true = local, false = global
+    float sampling;                  // sub-voxel sampling factor (1.0 = voxel)
     
     // Grid parameters
     int nx, ny, nz;                  // Grid dimensions
     float sx, sy, sz;                // Spacing in mm
+};
+
+struct OffsetEntry {
+    float ox;            // offset in voxels (x)
+    float oy;            // offset in voxels (y)
+    float oz;            // offset in voxels (z)
+    float spatial_term;  // (dist / dta_mm)^2
 };
 
 /**
@@ -54,6 +62,7 @@ struct GammaStats {
 void gamma_3d_cuda(
     const float* dose_eval,
     const float* dose_ref,
+    const uint8_t* roi_mask,
     float* gamma_map,
     const GammaParams& params,
     GammaStats* stats,

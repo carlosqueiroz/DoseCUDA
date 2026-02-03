@@ -77,6 +77,7 @@ class GammaCriteria:
     dose_threshold_percent: float = 10.0
     global_dose: Optional[float] = None
     max_gamma: float = 2.0
+    sampling: float = 1.0  # sub-voxel sampling factor (1.0 = voxel)
 
     def label(self) -> str:
         """Return human-readable label like '3%/3mm'."""
@@ -91,7 +92,8 @@ class GammaCriteria:
             'local': self.local,
             'dose_threshold_percent': self.dose_threshold_percent,
             'global_dose': self.global_dose,
-            'max_gamma': self.max_gamma
+            'max_gamma': self.max_gamma,
+            'sampling': self.sampling
         }
 
 
@@ -135,7 +137,9 @@ class GammaResult:
 
 def _precompute_search_offsets(
     dta_mm: float,
-    spacing_mm: Tuple[float, float, float]
+    spacing_mm: Tuple[float, float, float],
+    max_gamma: float,
+    sampling: float
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Precompute voxel offsets within DTA search radius.
@@ -149,39 +153,45 @@ def _precompute_search_offsets(
 
     Returns
     -------
-    offsets : np.ndarray
-        Array of shape (N, 3) with [di, dj, dk] offsets in voxels
-    distances : np.ndarray
-        Physical distance from center for each offset in mm
+    offsets_vox : np.ndarray
+        Array of shape (N, 3) with fractional offsets in voxel units (x,y,z).
+    spatial_terms : np.ndarray
+        (dist / dta_mm)^2 for each offset (float32).
     """
     sx, sy, sz = spacing_mm
+    search_mm = float(dta_mm * max_gamma)
+    samp = float(sampling) if sampling > 0 else 1.0
+    step_x = sx * samp
+    step_y = sy * samp
+    step_z = sz * samp
 
-    # Maximum offset in each dimension
-    max_di = int(np.ceil(dta_mm / sx))
-    max_dj = int(np.ceil(dta_mm / sy))
-    max_dk = int(np.ceil(dta_mm / sz))
+    max_ix = int(np.ceil(search_mm / step_x))
+    max_iy = int(np.ceil(search_mm / step_y))
+    max_iz = int(np.ceil(search_mm / step_z))
 
     offsets = []
-    distances = []
+    spatial_terms = []
 
-    for dk in range(-max_dk, max_dk + 1):
-        for dj in range(-max_dj, max_dj + 1):
-            for di in range(-max_di, max_di + 1):
-                # Physical distance
-                dist_mm = np.sqrt((di * sx)**2 + (dj * sy)**2 + (dk * sz)**2)
-                if dist_mm <= dta_mm:
-                    offsets.append([di, dj, dk])
-                    distances.append(dist_mm)
+    for kz in range(-max_iz, max_iz + 1):
+        dz_mm = kz * step_z
+        for jy in range(-max_iy, max_iy + 1):
+            dy_mm = jy * step_y
+            for ix in range(-max_ix, max_ix + 1):
+                dx_mm = ix * step_x
+                dist_mm = np.sqrt(dx_mm * dx_mm + dy_mm * dy_mm + dz_mm * dz_mm)
+                if dist_mm <= search_mm + 1e-6:
+                    offsets.append([dx_mm / sx, dy_mm / sy, dz_mm / sz])
+                    spatial_terms.append((dist_mm / dta_mm) ** 2 if dta_mm > 0 else 0.0)
 
-    offsets = np.array(offsets, dtype=np.int32)
-    distances = np.array(distances, dtype=np.float32)
+    offsets = np.array(offsets, dtype=np.float32)
+    spatial_terms = np.array(spatial_terms, dtype=np.float32)
 
-    # Sort by distance (check closest first for early termination)
-    sort_idx = np.argsort(distances)
+    # Sort by distance (spatial_terms already proportional to dist^2)
+    sort_idx = np.argsort(spatial_terms)
     offsets = offsets[sort_idx]
-    distances = distances[sort_idx]
+    spatial_terms = spatial_terms[sort_idx]
 
-    return offsets, distances
+    return offsets, spatial_terms
 
 
 def _compute_gamma_cuda(
@@ -219,15 +229,11 @@ def _compute_gamma_cuda(
             criteria=criteria.to_dict()
         )
     
-    # Prepare mask - NOTE: CUDA kernel does NOT support roi_mask yet
-    # If mask is provided, we must fall back to CPU
+    roi_arg = None
     if roi_mask is not None:
-        warnings.warn("CUDA gamma does not support roi_mask. Falling back to CPU.")
-        return None  # Signal to use CPU fallback
-    
+        roi_arg = np.ascontiguousarray(roi_mask.astype(np.uint8, copy=False))
+
     # Call CUDA function
-    # NOTE: kwlist in C is: dose_eval, dose_ref, spacing, dta_mm, dd_percent,
-    #       dose_threshold_percent, global_dose, local, max_gamma, return_map, gpu_id
     try:
         result = _gamma_3d_cuda(
             dose_eval=dose_eval,
@@ -239,7 +245,9 @@ def _compute_gamma_cuda(
             global_dose=D_global,
             local=criteria.local,
             max_gamma=criteria.max_gamma,
+            sampling=criteria.sampling,
             return_map=return_map,
+            roi_mask=roi_arg,
             gpu_id=gpu_id
         )
         
@@ -417,13 +425,10 @@ def _compute_gamma_cpu(
             criteria=criteria.to_dict()
         )
 
-    # Precompute search offsets
-    offsets, offset_distances = _precompute_search_offsets(
-        criteria.dta_mm, spacing_mm
+    # Precompute search offsets (fractional voxels) and spatial terms
+    offsets_vox, spatial_terms = _precompute_search_offsets(
+        criteria.dta_mm, spacing_mm, criteria.max_gamma, criteria.sampling
     )
-
-    # Precompute spatial term (distance / DTA)^2
-    spatial_terms = (offset_distances / criteria.dta_mm) ** 2
 
     # Initialize gamma map
     nz, ny, nx = dose_ref.shape
@@ -468,27 +473,64 @@ def _compute_gamma_cpu(
         active_mask = np.ones(len(batch_indices), dtype=bool)
         
         # Search over offsets (sorted by distance, closest first)
-        for n, (di, dj, dk) in enumerate(offsets):
+        for n, (off_x, off_y, off_z) in enumerate(offsets_vox):
             if not np.any(active_mask):
                 break  # All voxels found gamma <= 1
-                
+            
             # Compute target positions for active voxels only
             active_idx = np.where(active_mask)[0]
             
-            ii = batch_i[active_idx] + di
-            jj = batch_j[active_idx] + dj
-            kk = batch_k[active_idx] + dk
-            
-            # Bounds check
-            valid = (ii >= 0) & (ii < nx) & (jj >= 0) & (jj < ny) & (kk >= 0) & (kk < nz)
-            
+            fx = batch_i[active_idx].astype(np.float32) + off_x
+            fy = batch_j[active_idx].astype(np.float32) + off_y
+            fz = batch_k[active_idx].astype(np.float32) + off_z
+
+            # Bounds check (allow exact boundary)
+            valid = (
+                (fx >= 0) & (fx <= nx - 1) &
+                (fy >= 0) & (fy <= ny - 1) &
+                (fz >= 0) & (fz <= nz - 1)
+            )
+
             if not np.any(valid):
                 continue
                 
             valid_active_idx = active_idx[valid]
-            valid_ii = ii[valid]
-            valid_jj = jj[valid]
-            valid_kk = kk[valid]
+            fx = fx[valid]
+            fy = fy[valid]
+            fz = fz[valid]
+
+            # Trilinear interpolation of dose_eval at fractional coords
+            x0 = np.floor(fx).astype(np.int32)
+            y0 = np.floor(fy).astype(np.int32)
+            z0 = np.floor(fz).astype(np.int32)
+
+            x1 = np.minimum(x0 + 1, nx - 1)
+            y1 = np.minimum(y0 + 1, ny - 1)
+            z1 = np.minimum(z0 + 1, nz - 1)
+
+            tx = fx - x0
+            ty = fy - y0
+            tz = fz - z0
+
+            # Gather corners
+            c000 = dose_eval[z0, y0, x0]
+            c100 = dose_eval[z0, y0, x1]
+            c010 = dose_eval[z0, y1, x0]
+            c110 = dose_eval[z0, y1, x1]
+            c001 = dose_eval[z1, y0, x0]
+            c101 = dose_eval[z1, y0, x1]
+            c011 = dose_eval[z1, y1, x0]
+            c111 = dose_eval[z1, y1, x1]
+
+            c00 = c000 * (1 - tx) + c100 * tx
+            c01 = c001 * (1 - tx) + c101 * tx
+            c10 = c010 * (1 - tx) + c110 * tx
+            c11 = c011 * (1 - tx) + c111 * tx
+
+            c0 = c00 * (1 - ty) + c10 * ty
+            c1 = c01 * (1 - ty) + c11 * ty
+
+            D_eval_at_offset = c0 * (1 - tz) + c1 * tz
             
             # Get evaluated dose at offset positions
             D_eval_at_offset = dose_eval[valid_kk, valid_jj, valid_ii]

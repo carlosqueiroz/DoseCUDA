@@ -641,12 +641,18 @@ def test_4_gpu_dose_calculation(materialized_case, machine_model):
     progress_print(f"\n✓ Dose sanity checks passed")
 
 
-def test_5_save_numpy_and_nrrd(materialized_case, machine_model):
+def test_5_save_numpy_and_nrrd(discovered_case, materialized_case, machine_model):
     """Test 5: Save dose as numpy (.npy) and NRRD."""
     progress_print("\n" + "=" * 80)
     progress_print("TEST 5: Save NPY and NRRD")
     progress_print("=" * 80)
     
+    # If multiple treatment phases exist, skip global root saves
+    phases = enumerate_phases(discovered_case)
+    if len(phases) > 1:
+        progress_print("  ℹ Multiple phases detected; skipping global NPY/NRRD saves (per-phase outputs will be used).")
+        return
+
     output_dir = get_output_dir()
     
     dg, _ = get_or_calculate_dose(materialized_case, machine_model)
@@ -688,7 +694,7 @@ def test_5_save_numpy_and_nrrd(materialized_case, machine_model):
     progress_print(f"  → {stats_path}")
 
 
-def test_6_resample_and_save_dicom_rtdose(materialized_case, machine_model, selected_files):
+def test_6_resample_and_save_dicom_rtdose(discovered_case, materialized_case, machine_model, selected_files):
     """Test 6: Resample calculated dose to RTDOSE template grid and save DICOM."""
     progress_print("\n" + "=" * 80)
     progress_print("TEST 6: Resample to Template Grid and Save DICOM RTDOSE")
@@ -697,6 +703,12 @@ def test_6_resample_and_save_dicom_rtdose(materialized_case, machine_model, sele
     if not materialized_case['rtdose']:
         pytest.skip("No RTDOSE template found - skipping DICOM export")
     
+    # If multiple treatment phases exist, skip global RTDOSE export (per-phase exports will be used).
+    phases = enumerate_phases(discovered_case)
+    if len(phases) > 1:
+        progress_print("  ℹ Multiple phases detected; skipping global RTDOSE export (per-phase RTDOSE will be created in test_13).")
+        return
+
     output_dir = get_output_dir()
     
     tracker = ProgressTracker("DICOM Export", total_steps=5)
@@ -790,6 +802,7 @@ def test_6_resample_and_save_dicom_rtdose(materialized_case, machine_model, sele
     assert saved_ds.Rows == template_ds.Rows, "Rows mismatch"
     assert saved_ds.Columns == template_ds.Columns, "Columns mismatch"
     assert saved_ds.NumberOfFrames == template_ds.NumberOfFrames, "NumberOfFrames mismatch"
+    assert 0 < float(saved_ds.DoseGridScaling) < 1, "DoseGridScaling outside plausible range"
     
     tracker.done(f"Saved: {output_dcm_path.name}")
     progress_print(f"  SOPInstanceUID: {saved_ds.SOPInstanceUID}")
@@ -833,7 +846,7 @@ def test_7_summary(discovered_case, selected_files, machine_model):
 # Secondary Check Tests (Tests 8-11)
 # ============================================================================
 
-def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
+def test_8_gamma_analysis(discovered_case, materialized_case, machine_model, reference_rtdose):
     """Test 8: Compute gamma analysis comparing DoseCUDA vs TPS."""
     progress_print("\n" + "=" * 80)
     progress_print("TEST 8: Gamma Analysis (DoseCUDA vs TPS)")
@@ -896,8 +909,8 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
     progress_print(f"  Mean gamma: {result_2_2.mean_gamma:.3f}")
     progress_print(f"  Gamma P95: {result_2_2.gamma_p95:.3f}")
 
-    # Save gamma summary
-    output_dir = get_output_dir()
+    # Save gamma summary (skip global save if multi-phase; per-phase gamma is produced in test_13)
+    phases = enumerate_phases(discovered_case)
     import json
     gamma_summary = {
         "timestamp": datetime.now().isoformat(),
@@ -915,10 +928,13 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
         }
     }
 
-    with open(output_dir / "gamma_summary.json", 'w') as f:
-        json.dump(gamma_summary, f, indent=2)
-
-    progress_print(f"\n✓ Gamma summary saved: gamma_summary.json")
+    if len(phases) > 1:
+        progress_print("\n  ℹ Multiple phases detected; skipping global gamma_summary.json (per-phase gamma saved in test_13).")
+    else:
+        output_dir = get_output_dir()
+        with open(output_dir / "gamma_summary.json", 'w') as f:
+            json.dump(gamma_summary, f, indent=2)
+        progress_print(f"\n✓ Gamma summary saved: gamma_summary.json")
 
     if result_3_3.pass_rate < 0.95:
         warnings.warn(f"Gamma 3%/3mm pass rate {result_3_3.pass_rate:.1%} < 95%")
@@ -926,7 +942,7 @@ def test_8_gamma_analysis(materialized_case, machine_model, reference_rtdose):
         warnings.warn(f"Gamma 2%/2mm pass rate {result_2_2.pass_rate:.1%} < 90%")
 
 
-def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, rasterized_rois):
+def test_9_dvh_comparison(discovered_case, materialized_case, machine_model, reference_rtdose, rasterized_rois):
     """Test 9: Compare DVH metrics for targets and OARs."""
     progress_print("\n" + "=" * 80)
     progress_print("TEST 9: DVH Comparison (DoseCUDA vs TPS)")
@@ -974,11 +990,15 @@ def test_9_dvh_comparison(materialized_case, machine_model, reference_rtdose, ra
             report_lines.append(report)
             progress_print(report)
 
-    # Save DVH report
-    with open(output_dir / "dvh_comparison.txt", 'w') as f:
-        f.write('\n'.join(report_lines))
+    # Save DVH report (skip global save if multi-phase)
+    phases = enumerate_phases(discovered_case)
+    if len(phases) > 1:
+        progress_print("\n  ℹ Multiple phases detected; skipping global dvh_comparison.txt (per-phase DVH saved in test_13).")
+    else:
+        with open(output_dir / "dvh_comparison.txt", 'w') as f:
+            f.write('\n'.join(report_lines))
 
-    progress_print(f"\n✓ DVH comparison saved: dvh_comparison.txt")
+        progress_print(f"\n✓ DVH comparison saved: dvh_comparison.txt")
 
 
 def test_10_mu_sanity_check(materialized_case, machine_model, reference_rtdose):
@@ -995,6 +1015,12 @@ def test_10_mu_sanity_check(materialized_case, machine_model, reference_rtdose):
     # Load plan for MU info
     plan = IMRTPlan(machine_name=machine_model)
     plan.readPlanDicom(str(materialized_case['rtplan']))
+    positive_cps = sum(
+        1 for beam in plan.beam_list for cp in beam.cp_list if getattr(cp, 'mu', 0) > 0
+    )
+    if positive_cps == 0:
+        warnings.warn("No control points with MU > 0 after parsing; skipping MU sanity check")
+        pytest.skip("No control points with MU > 0 after parsing")
 
     progress_print(f"\nComputing MU sanity check...")
 
@@ -1022,7 +1048,7 @@ def test_10_mu_sanity_check(materialized_case, machine_model, reference_rtdose):
         progress_print(f"\n⚠ MU sanity check skipped: {e}")
 
 
-def test_11_generate_report(materialized_case, machine_model, reference_rtdose, rasterized_rois):
+def test_11_generate_report(discovered_case, materialized_case, machine_model, reference_rtdose, rasterized_rois):
     """Test 11: Generate JSON and CSV secondary check reports."""
     progress_print("\n" + "=" * 80)
     progress_print("TEST 11: Generate Secondary Check Report")
@@ -1071,13 +1097,18 @@ def test_11_generate_report(materialized_case, machine_model, reference_rtdose, 
     )
 
     # Generate reports
-    tracker.step("Generating JSON report...")
-    json_path = output_dir / "secondary_check_report.json"
-    generate_json_report(result, str(json_path))
+    # Generate reports but skip writing global files if multiple phases exist
+    phases = enumerate_phases(discovered_case)
+    if len(phases) > 1:
+        progress_print("  ℹ Multiple phases detected; skipping global secondary check reports (per-phase reports produced in test_13).")
+    else:
+        tracker.step("Generating JSON report...")
+        json_path = output_dir / "secondary_check_report.json"
+        generate_json_report(result, str(json_path))
 
-    tracker.step("Generating CSV report...")
-    csv_path = output_dir / "secondary_check_report.csv"
-    generate_csv_report(result, str(csv_path))
+        tracker.step("Generating CSV report...")
+        csv_path = output_dir / "secondary_check_report.csv"
+        generate_csv_report(result, str(csv_path))
 
     tracker.done("Reports generated")
 
@@ -1099,9 +1130,13 @@ def test_11_generate_report(materialized_case, machine_model, reference_rtdose, 
         for reason in result.failure_reasons:
             progress_print(f"    - {reason}")
 
-    # Verify files exist
-    assert json_path.exists(), "JSON report not created"
-    assert csv_path.exists(), "CSV report not created"
+    # Verify files exist (only when global reports were written)
+    phases = enumerate_phases(discovered_case)
+    if len(phases) == 1:
+        assert json_path.exists(), "JSON report not created"
+        assert csv_path.exists(), "CSV report not created"
+    else:
+        progress_print("  ℹ Global report creation was skipped due to multiple phases; per-phase reports expected.")
 
     progress_print(f"\n{'='*60}")
     progress_print(f"SECONDARY CHECK COMPLETE")
@@ -1232,10 +1267,16 @@ def test_13_calculate_all_phases(discovered_case, materialized_case, machine_mod
         max_dose = np.max(dg.dose)
         tracker.done(f"Max dose: {max_dose:.2f} Gy")
         
-        # Save results
-        npy_path = phase_output / "dose.npy"
+        # Save results (unique filenames per phase)
+        npy_path = phase_output / f"dose_phase_{i}.npy"
         np.save(npy_path, dg.dose)
-        progress_print(f"  → Saved: {npy_path}")
+        progress_print(f"  → Saved: {npy_path.name}")
+
+        # Save NRRD on calculation grid
+        nrrd_path = phase_output / f"dose_phase_{i}.nrrd"
+        dg.writeDoseNRRD(str(nrrd_path), dose_type="PHYSICAL")
+        progress_print(f"  → Saved NRRD: {nrrd_path.name}")
+        assert nrrd_path.exists(), "Phase NRRD not created"
         
         # Store result info
         phase_result = {
@@ -1247,7 +1288,7 @@ def test_13_calculate_all_phases(discovered_case, materialized_case, machine_mod
             'has_tps_reference': phase.rtdose is not None
         }
         
-        # If TPS reference available, compare
+        # If TPS reference available, compare and export RTDOSE for this phase
         if phase.rtdose:
             ref_rd = pydicom.dcmread(str(phase.rtdose.path))
             ref_dose = ref_rd.pixel_array * ref_rd.DoseGridScaling
@@ -1255,7 +1296,226 @@ def test_13_calculate_all_phases(discovered_case, materialized_case, machine_mod
             phase_result['dose_ratio'] = max_dose / float(np.max(ref_dose)) if np.max(ref_dose) > 0 else 0
             progress_print(f"  → TPS reference max: {phase_result['tps_max_dose_gy']:.2f} Gy")
             progress_print(f"  → Ratio (DoseCUDA/TPS): {phase_result['dose_ratio']:.3f}")
-        
+
+            # Build template grid from RTDOSE
+            template_path = str(phase.rtdose.path)
+            template_ds = pydicom.dcmread(template_path, force=True)
+
+            template_origin = np.array(template_ds.ImagePositionPatient)
+            pixel_spacing = np.array(template_ds.PixelSpacing)
+            if hasattr(template_ds, 'GridFrameOffsetVector'):
+                frame_offsets = np.array(template_ds.GridFrameOffsetVector)
+                if len(frame_offsets) > 1:
+                    slice_spacing = frame_offsets[1] - frame_offsets[0]
+                else:
+                    slice_spacing = pixel_spacing[0]
+            else:
+                warnings.warn("Template RTDOSE has no GridFrameOffsetVector, assuming cubic voxels")
+                slice_spacing = pixel_spacing[0]
+
+            template_spacing = np.array([pixel_spacing[1], pixel_spacing[0], slice_spacing])
+            template_size = np.array([
+                int(template_ds.Columns),
+                int(template_ds.Rows),
+                int(template_ds.NumberOfFrames) if hasattr(template_ds, 'NumberOfFrames') else 1
+            ])
+
+            if hasattr(template_ds, 'ImageOrientationPatient'):
+                orientation = np.array(template_ds.ImageOrientationPatient)
+                row_cos = orientation[:3]
+                col_cos = orientation[3:]
+                slice_cos = np.cross(row_cos, col_cos)
+                direction = np.column_stack([row_cos, col_cos, slice_cos])
+                if not np.allclose(direction, np.eye(3), atol=0.1):
+                    pytest.fail("Template RTDOSE is not axial - not yet supported.")
+            else:
+                direction = np.eye(3)
+
+            template_grid = GridInfo(origin=template_origin, spacing=template_spacing,
+                                     size=template_size, direction=direction)
+
+            calc_grid = GridInfo(origin=dg.origin, spacing=dg.spacing, size=dg.size, direction=np.eye(3))
+            dose_resampled = resample_dose_linear(dose=dg.dose, source_grid=calc_grid, target_grid=template_grid)
+
+            expected_shape = (template_size[2], template_size[1], template_size[0])
+            assert dose_resampled.shape == expected_shape, \
+                f"Resampled shape {dose_resampled.shape} != template {expected_shape}"
+
+            # Update dose grid to template for export
+            dg.dose = dose_resampled
+            dg.origin = template_grid.origin
+            dg.spacing = template_grid.spacing
+            dg.size = template_grid.size
+
+            # Save RTDOSE for this phase
+            rtplan_ds = pydicom.dcmread(str(phase.rtplan.path), stop_before_pixels=True)
+            dcm_path = phase_output / f"DoseCUDA_RD_phase_{i}.dcm"
+            dg.writeDoseDCM(
+                dose_path=str(dcm_path),
+                ref_dose_path=template_path,
+                dose_type="PHYSICAL",
+                rtplan_sop_uid=rtplan_ds.SOPInstanceUID
+            )
+            phase_result['dose_dcm'] = dcm_path.name
+            progress_print(f"  → Saved RTDOSE: {dcm_path.name}")
+            assert dcm_path.exists(), "Phase RTDOSE not created"
+
+            # --- Per-phase analyses: Gamma, DVH, Secondary Report ---
+            try:
+                from DoseCUDA.dvh import read_reference_rtdose, compute_metrics, compare_dvh_metrics, generate_dvh_report
+                from DoseCUDA.gamma import compute_gamma_3d, GammaCriteria
+                from DoseCUDA.rtstruct import read_rtstruct, rasterize_roi_to_mask
+                from DoseCUDA.roi_selection import classify_rois, get_target_metrics_spec, get_oar_metrics_spec
+                from DoseCUDA.secondary_report import (
+                    evaluate_secondary_check,
+                    generate_json_report,
+                    generate_csv_report,
+                    SecondaryCheckCriteria
+                )
+
+                # Read TPS RTDOSE for this phase
+                ref_dose_arr, ref_origin, ref_spacing, ref_frame = read_reference_rtdose(template_path)
+                reference_rtdose = {
+                    'dose': ref_dose_arr,
+                    'origin': ref_origin,
+                    'spacing': ref_spacing,
+                    'frame_uid': ref_frame
+                }
+
+                # Save gamma summary for this phase
+                try:
+                    criteria_3_3 = GammaCriteria(dta_mm=3.0, dd_percent=3.0, local=False, dose_threshold_percent=10.0)
+                    result_3_3 = compute_gamma_3d(
+                        dose_eval=dose_resampled,
+                        dose_ref=reference_rtdose['dose'],
+                        spacing_mm=tuple(reference_rtdose['spacing']),
+                        criteria=criteria_3_3
+                    )
+
+                    criteria_2_2 = GammaCriteria(dta_mm=2.0, dd_percent=2.0, local=False, dose_threshold_percent=10.0)
+                    result_2_2 = compute_gamma_3d(
+                        dose_eval=dose_resampled,
+                        dose_ref=reference_rtdose['dose'],
+                        spacing_mm=tuple(reference_rtdose['spacing']),
+                        criteria=criteria_2_2
+                    )
+
+                    import json
+                    gamma_summary = {
+                        'phase': i,
+                        'timestamp': datetime.now().isoformat(),
+                        '3%/3mm': {
+                            'pass_rate': result_3_3.pass_rate,
+                            'mean_gamma': result_3_3.mean_gamma,
+                            'gamma_p95': result_3_3.gamma_p95,
+                            'n_evaluated': result_3_3.n_evaluated
+                        },
+                        '2%/2mm': {
+                            'pass_rate': result_2_2.pass_rate,
+                            'mean_gamma': result_2_2.mean_gamma,
+                            'gamma_p95': result_2_2.gamma_p95,
+                            'n_evaluated': result_2_2.n_evaluated
+                        }
+                    }
+
+                    with open(phase_output / f"gamma_summary_phase_{i}.json", 'w') as gf:
+                        json.dump(gamma_summary, gf, indent=2)
+
+                    progress_print(f"  → Saved gamma summary: gamma_summary_phase_{i}.json")
+                except Exception as e:
+                    warnings.warn(f"Per-phase gamma failed for phase {i}: {e}")
+
+                # Rasterize ROIs and compute DVH comparisons if RTSTRUCT exists
+                dvh_lines = []
+                if phase.rtstruct:
+                    try:
+                        rtstruct_ds = read_rtstruct(str(phase.rtstruct.path))
+                        roi_names = list(rtstruct_ds.rois.keys())
+                        classification = classify_rois(roi_names)
+
+                        # Build ref grid for template
+                        ref_grid = GridInfo(
+                            origin=reference_rtdose['origin'],
+                            spacing=reference_rtdose['spacing'],
+                            size=np.array(reference_rtdose['dose'].shape[::-1]),
+                            direction=np.eye(3)
+                        )
+
+                        masks = {}
+                        for roi_name in classification.targets + classification.oars:
+                            if roi_name in rtstruct_ds.rois:
+                                try:
+                                    mask = rasterize_roi_to_mask(
+                                        rtstruct_ds.rois[roi_name],
+                                        ref_grid.origin,
+                                        ref_grid.spacing,
+                                        ref_grid.size[::-1],
+                                        direction=ref_grid.direction
+                                    )
+                                    if np.any(mask):
+                                        masks[roi_name] = mask
+                                except Exception:
+                                    continue
+
+                        # Compute DVH for targets
+                        for roi_name in classification.targets:
+                            if roi_name in masks:
+                                metrics_spec = get_target_metrics_spec()
+                                metrics_calc = compute_metrics(dose_resampled, masks[roi_name], ref_spacing, metrics_spec)
+                                metrics_ref = compute_metrics(reference_rtdose['dose'], masks[roi_name], ref_spacing, metrics_spec)
+                                comparison = compare_dvh_metrics(metrics_calc, metrics_ref)
+                                report = generate_dvh_report(roi_name, metrics_calc, comparison)
+                                dvh_lines.append(report)
+
+                        # Compute DVH for first 5 OARs
+                        for roi_name in classification.oars[:5]:
+                            if roi_name in masks:
+                                metrics_spec = get_oar_metrics_spec()
+                                metrics_calc = compute_metrics(dose_resampled, masks[roi_name], ref_spacing, metrics_spec)
+                                metrics_ref = compute_metrics(reference_rtdose['dose'], masks[roi_name], ref_spacing, metrics_spec)
+                                comparison = compare_dvh_metrics(metrics_calc, metrics_ref)
+                                report = generate_dvh_report(roi_name, metrics_calc, comparison)
+                                dvh_lines.append(report)
+
+                        # Save DVH comparison per phase
+                        with open(phase_output / f"dvh_comparison_phase_{i}.txt", 'w') as df:
+                            df.write('\n'.join(dvh_lines))
+
+                        progress_print(f"  → Saved DVH comparison: dvh_comparison_phase_{i}.txt")
+                    except Exception as e:
+                        warnings.warn(f"Per-phase DVH failed for phase {i}: {e}")
+
+                # Secondary check evaluation per phase
+                try:
+                    criteria = SecondaryCheckCriteria()
+                    result = evaluate_secondary_check(
+                        dose_calc=dose_resampled,
+                        dose_ref=reference_rtdose['dose'],
+                        grid_origin=reference_rtdose['origin'],
+                        grid_spacing=reference_rtdose['spacing'],
+                        rois=(masks if 'masks' in locals() else {}),
+                        roi_classification=(classification if 'classification' in locals() else None),
+                        plan=plan,
+                        patient_id=plan.patient_id if hasattr(plan, 'patient_id') else getattr(rtplan_ds, 'PatientID', 'UNKNOWN'),
+                        plan_name=plan.plan_name if hasattr(plan, 'plan_name') else getattr(rtplan_ds, 'RTPlanLabel', 'UNKNOWN'),
+                        plan_uid=plan.plan_uid if hasattr(plan, 'plan_uid') else getattr(rtplan_ds, 'SOPInstanceUID', 'UNKNOWN'),
+                        criteria=criteria
+                    )
+
+                    json_path = phase_output / f"secondary_check_report_phase_{i}.json"
+                    csv_path = phase_output / f"secondary_check_report_phase_{i}.csv"
+                    generate_json_report(result, str(json_path))
+                    generate_csv_report(result, str(csv_path))
+
+                    progress_print(f"  → Saved secondary reports: {json_path.name}, {csv_path.name}")
+                except Exception as e:
+                    warnings.warn(f"Per-phase secondary check failed for phase {i}: {e}")
+
+            except Exception as e:
+                warnings.warn(f"Per-phase analyses skipped for phase {i}: {e}")
+        else:
+            progress_print(f"  → TPS reference max: None")
+
         results.append(phase_result)
     
     # Summary

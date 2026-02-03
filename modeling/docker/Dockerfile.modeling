@@ -1,0 +1,131 @@
+# =====================================================================
+# TOPAS 4.0 + Geant4 11.1.3 (via git) + Celeritas 0.6.1 (CUDA)
+# Binário TOPAS: /topas/topas/bin/topas
+# G4 data dir:   /G4Data  (via TOPAS_G4_DATA_DIR)
+# Requer host com nvidia-container-toolkit e --gpus all no docker run
+# =====================================================================
+FROM nvidia/cuda:12.6.0-devel-ubuntu24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG GEANT4_VERSION=11.1.3
+ARG TOPAS_VERSION=v4.0.0
+ARG CELERITAS_VERSION=v0.6.1
+# >>> Defina as arquiteturas CUDA alvo (>=60). Ajuste conforme sua GPU:
+ARG CUDA_ARCH_LIST="60;61;70;75;80;86;89;90"
+
+ARG GEANT4_PREFIX=/opt/geant4/${GEANT4_VERSION}
+ARG CELERITAS_PREFIX=/opt/celeritas/${CELERITAS_VERSION}
+ARG TOPAS_PREFIX=/topas/topas
+
+# Metadata: last known-good local build
+LABEL maintainer="rt@dev" \
+    topas_version="${TOPAS_VERSION}" \
+    celeritas_version="${CELERITAS_VERSION}" \
+    geant4_version="${GEANT4_VERSION}"
+
+# --------------------------
+# Dependências de build
+# --------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git wget curl ca-certificates pkg-config \
+    python3 python3-pip python3-venv python3-tk \
+    libx11-dev libxmu-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev \
+    libexpat1-dev libxerces-c-dev \
+    qtbase5-dev qtchooser qt5-qmake qtbase5-dev-tools  \
+    libopengl0 libopengl-dev libqt5opengl5-dev \
+    libgdcm-dev libgdcm-tools dcmtk unzip jq \
+ && rm -rf /var/lib/apt/lists/*
+
+# Caminhos e variáveis úteis
+ENV LD_LIBRARY_PATH="${GEANT4_PREFIX}/lib:${CELERITAS_PREFIX}/lib:${LD_LIBRARY_PATH}"
+ENV PATH="${GEANT4_PREFIX}/bin:${PATH}"
+ENV CMAKE_PREFIX_PATH="${GEANT4_PREFIX};${CELERITAS_PREFIX}"
+ENV TOPAS_G4_DATA_DIR=/G4Data
+ENV topas="${TOPAS_PREFIX}/bin/topas"
+
+# Diretórios úteis para I/O
+RUN mkdir -p /input /output /phsp /workflow
+
+# --------------------------
+# Geant4 11.1.3 (clone via git) + datasets
+# --------------------------
+WORKDIR /tmp
+RUN git clone --depth 1 --filter=blob:none --branch v${GEANT4_VERSION} \
+    https://github.com/Geant4/geant4.git geant4-src
+
+RUN cmake -S /tmp/geant4-src -B /tmp/geant4-build \
+          -DCMAKE_INSTALL_PREFIX=${GEANT4_PREFIX} \
+          -DGEANT4_BUILD_MULTITHREADED=ON \
+          -DGEANT4_USE_GDML=ON \
+          -DGEANT4_USE_QT=ON \
+          -DGEANT4_USE_OPENGL_X11=ON \
+          -DGEANT4_INSTALL_DATA=ON \
+ && cmake --build /tmp/geant4-build -j"$(nproc)" \
+ && cmake --install /tmp/geant4-build
+
+# Geant4 env script e link para datasets
+RUN echo ". ${GEANT4_PREFIX}/bin/geant4.sh" > /etc/profile.d/geant4.sh
+RUN ln -s ${GEANT4_PREFIX}/share/Geant4/data /G4Data
+
+# --------------------------
+# Celeritas 0.6 (CUDA + Geant4) — define CMAKE_CUDA_ARCHITECTURES!
+# --------------------------
+WORKDIR /tmp
+RUN git clone --branch ${CELERITAS_VERSION} --depth 1 https://github.com/celeritas-project/celeritas.git
+
+RUN cmake -S /tmp/celeritas -B /tmp/celeritas-build \
+          -DCMAKE_INSTALL_PREFIX=${CELERITAS_PREFIX} \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCELERITAS_USE_CUDA=ON \
+          -DCELERITAS_USE_Geant4=ON \
+          -DCELERITAS_BUILD_DEMOS=OFF \
+          -DCELERITAS_BUILD_TESTS=OFF \
+          -DGeant4_DIR=${GEANT4_PREFIX}/lib/cmake/Geant4 \
+          -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH_LIST}" \
+ && cmake --build /tmp/celeritas-build -j"$(nproc)" \
+ && cmake --install /tmp/celeritas-build
+
+# --------------------------
+# OpenTOPAS 4.0.0 (CPU/GPU-ready)
+# --------------------------
+WORKDIR /tmp
+RUN git clone --branch ${TOPAS_VERSION} --depth 1 https://github.com/OpenTOPAS/OpenTOPAS.git
+
+# OBS: se você tiver extensão GPU (TsGpu*), copie-a para /tmp/OpenTOPAS/extensions/gpu
+# e acrescente -DTOPAS_EXTENSIONS_DIR=/tmp/OpenTOPAS/extensions/gpu ao cmake abaixo.
+
+RUN cmake -S /tmp/OpenTOPAS -B /tmp/OpenTOPAS-build \
+          -DCMAKE_INSTALL_PREFIX=${TOPAS_PREFIX} \
+          -DGeant4_DIR=${GEANT4_PREFIX}/lib/cmake/Geant4 \
+          -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \
+ && cmake --build /tmp/OpenTOPAS-build -j"$(nproc)" \
+ && cmake --install /tmp/OpenTOPAS-build
+
+# Link de conveniência e PATH do topas
+RUN ln -sf ${TOPAS_PREFIX}/bin/topas /usr/local/bin/topas
+ENV PATH="/usr/local/bin:${PATH}"
+
+# --------------------------
+# Pacotes Python úteis
+# --------------------------
+RUN pip3 install --no-cache-dir --break-system-packages \
+    pydicom numpy cherrypy simpleitk boto3 minio psutil pika \
+    psycopg2-binary alembic sqlalchemy
+
+# --------------------------
+# TPS2TOPAS utilitário (opcional)
+# --------------------------
+RUN git clone --depth=1 https://github.com/OpenTOPAS/TPS2TOPAS_interface.git /opt/TPS2TOPAS_interface \
+ && printf '#!/bin/bash\nexec python3 /opt/TPS2TOPAS_interface/TPS2TOPAS.py \"$@\"\n' \
+      > /usr/local/bin/tps2topas && chmod +x /usr/local/bin/tps2topas
+
+# --------------------------
+# API e entrypoint
+# --------------------------
+COPY modeling/topas_inputs/ /workflow/topas_inputs/
+COPY modeling/docker/workflow/ /workflow/
+RUN chmod +x /workflow/run.sh
+
+EXPOSE 8080
+WORKDIR /workflow
+ENTRYPOINT ["/workflow/run.sh"]

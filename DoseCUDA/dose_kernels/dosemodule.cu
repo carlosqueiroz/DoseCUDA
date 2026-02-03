@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <object.h>
 #include <numpy/arrayobject.h>
+#include <cstdint>
 
 #include "IMRTClasses.cuh"
 #include "MemoryClasses.h"
@@ -395,22 +396,25 @@ double mu_cal,
 static PyObject* gamma_3d(PyObject* self, PyObject* args, PyObject* kwargs) {
 	
 	PyArrayObject *dose_eval_arr, *dose_ref_arr;
+	PyObject *roi_obj = Py_None;
 	PyObject *spacing_tuple;
-	double dta_mm, dd_percent, dose_threshold_percent, global_dose, max_gamma;
+	double dta_mm, dd_percent, dose_threshold_percent, global_dose, max_gamma, sampling = 1.0;
 	int local_norm, return_map, gpu_id;
 	
 	static char* kwlist[] = {
 		"dose_eval", "dose_ref", "spacing", 
 		"dta_mm", "dd_percent", "dose_threshold_percent",
-		"global_dose", "local", "max_gamma", "return_map", "gpu_id", NULL
+		"global_dose", "local", "max_gamma", "return_map", "gpu_id",
+		"roi_mask", "sampling", NULL
 	};
 	
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!Oddddpdpi", kwlist,
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O!O!Oddddpdpi|Od", kwlist,
 			&PyArray_Type, &dose_eval_arr,
 			&PyArray_Type, &dose_ref_arr,
 			&spacing_tuple,
 			&dta_mm, &dd_percent, &dose_threshold_percent,
-			&global_dose, &local_norm, &max_gamma, &return_map, &gpu_id)) {
+			&global_dose, &local_norm, &max_gamma, &return_map, &gpu_id,
+			&roi_obj, &sampling)) {
 		return NULL;
 	}
 	
@@ -432,6 +436,28 @@ static PyObject* gamma_3d(PyObject* self, PyObject* args, PyObject* kwargs) {
 		shape_eval[2] != shape_ref[2]) {
 		PyErr_SetString(PyExc_ValueError, "dose_eval and dose_ref must have same shape");
 		return NULL;
+	}
+
+	// ROI mask (optional)
+	uint8_t* roi_data = nullptr;
+	PyArrayObject* roi_mask_arr = nullptr;
+	if (roi_obj != Py_None) {
+		if (!PyArray_Check(roi_obj)) {
+			PyErr_SetString(PyExc_ValueError, "roi_mask must be a NumPy array or None");
+			return NULL;
+		}
+		roi_mask_arr = (PyArrayObject*)roi_obj;
+		if (!pyarray_typecheck(roi_mask_arr, 3, NPY_BOOL) &&
+			!pyarray_typecheck(roi_mask_arr, 3, NPY_UBYTE)) {
+			PyErr_SetString(PyExc_ValueError, "roi_mask must be 3D bool or uint8 array");
+			return NULL;
+		}
+		npy_intp *shape_mask = PyArray_DIMS(roi_mask_arr);
+		if (shape_mask[0] != shape_ref[0] || shape_mask[1] != shape_ref[1] || shape_mask[2] != shape_ref[2]) {
+			PyErr_SetString(PyExc_ValueError, "roi_mask shape must match dose arrays");
+			return NULL;
+		}
+		roi_data = (uint8_t*)PyArray_DATA(roi_mask_arr);
 	}
 	
 	// Parse spacing tuple
@@ -475,6 +501,7 @@ static PyObject* gamma_3d(PyObject* self, PyObject* args, PyObject* kwargs) {
 	params.global_dose = (float)global_dose;
 	params.local_normalization = (bool)local_norm;
 	params.max_gamma = (float)max_gamma;
+	params.sampling = (float)sampling;
 	
 	// Allocate gamma map if needed
 	float* gamma_map_data = nullptr;
@@ -497,7 +524,7 @@ static PyObject* gamma_3d(PyObject* self, PyObject* args, PyObject* kwargs) {
 		}
 		
 		// Run gamma computation
-		gamma_3d_cuda(dose_eval_data, dose_ref_data, gamma_map_data, params, &stats, 0);
+		gamma_3d_cuda(dose_eval_data, dose_ref_data, roi_data, gamma_map_data, params, &stats, 0);
 		
 	} catch (std::runtime_error &e) {
 		if (gamma_map_arr) Py_DECREF(gamma_map_arr);
@@ -577,6 +604,8 @@ static PyMethodDef DoseMethods[] = {
 		"    global_dose: reference dose for normalization (0 = use max)\n"
 		"    local: use local normalization (bool)\n"
 		"    max_gamma: cap gamma values\n"
+		"    roi_mask: optional bool mask array (same shape) to limit evaluation\n"
+		"    sampling: sub-voxel sampling factor (1.0 = voxel)\n"
 		"    return_map: return gamma map array (bool)\n"
 		"    gpu_id: GPU device ID\n\n"
 		"Returns:\n"

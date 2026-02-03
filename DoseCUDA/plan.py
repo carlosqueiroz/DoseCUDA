@@ -340,7 +340,23 @@ class DoseGrid:
                     max_pixel_value = 2**16 - 1  # uint16
                     pixel_dtype = np.uint16
                 
-                scaling = max(max_dose / max_pixel_value, 1e-10)  # Avoid divide by zero
+                # Choose scaling: map max_dose to full dynamic range; clamp to 1 LSB if dose is ~0
+                if max_dose <= 0:
+                    import warnings
+                    scaling = 1.0 / max_pixel_value
+                    warnings.warn(
+                        "Beam dose max <= 0 Gy; using minimal scaling derived from bit depth."
+                    )
+                else:
+                    scaling = max_dose / max_pixel_value
+                    lsb = 1.0 / max_pixel_value
+                    if scaling < lsb:
+                        import warnings
+                        warnings.warn(
+                            f"Beam dose max {max_dose:.3e} Gy extremely small; "
+                            f"clamping DoseGridScaling to {lsb:.3e} to avoid underflow."
+                        )
+                        scaling = lsb
                 
                 # Convert to appropriate pixel type
                 pixels = np.clip(np.rint(dose_gy / scaling), 0, max_pixel_value).astype(pixel_dtype)
@@ -394,7 +410,22 @@ class DoseGrid:
                 max_pixel_value = 2**16 - 1  # uint16
                 pixel_dtype = np.uint16
             
-            scaling = max(max_dose / max_pixel_value, 1e-10)  # Avoid divide by zero
+            if max_dose <= 0:
+                import warnings
+                scaling = 1.0 / max_pixel_value
+                warnings.warn(
+                    "Plan dose max <= 0 Gy; using minimal scaling derived from bit depth."
+                )
+            else:
+                scaling = max_dose / max_pixel_value
+                lsb = 1.0 / max_pixel_value
+                if scaling < lsb:
+                    import warnings
+                    warnings.warn(
+                        f"Plan dose max {max_dose:.3e} Gy extremely small; "
+                        f"clamping DoseGridScaling to {lsb:.3e} to avoid underflow."
+                    )
+                    scaling = lsb
             
             # Convert to appropriate pixel type
             pixels = np.clip(np.rint(dose_gy / scaling), 0, max_pixel_value).astype(pixel_dtype)
