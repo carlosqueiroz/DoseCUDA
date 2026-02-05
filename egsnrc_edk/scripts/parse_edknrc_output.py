@@ -5,7 +5,7 @@ import numpy as np
 import re
 import json
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from common import load_config, default_grid_from_config, KernelGrid, ensure_dir
 
 
@@ -41,6 +41,87 @@ def _parse_egsdat(path: Path, grid: KernelGrid, energy_mev: float, ncases_hint: 
     return kdiff
 
 
+def _nearest_index(value: float, targets: np.ndarray, tol: float) -> Optional[int]:
+    idx = int(np.argmin(np.abs(targets - value)))
+    if abs(targets[idx] - value) > tol:
+        return None
+    return idx
+
+
+def _map_rows_to_grid(
+    rows: List[Tuple[float, float, float]], grid: KernelGrid, use_centers: bool
+) -> Optional[np.ndarray]:
+    theta_targets = grid.theta_centers if use_centers else grid.theta_edges[1:]
+    r_targets = grid.r_edges[1:]
+    out = np.full((grid.nTheta, grid.nR), np.nan, dtype=np.float64)
+    for theta, radius, val in rows:
+        ti = _nearest_index(theta, theta_targets, tol=1e-3)
+        ri = _nearest_index(radius, r_targets, tol=5e-4)
+        if ti is None or ri is None:
+            return None
+        if np.isnan(out[ti, ri]):
+            out[ti, ri] = val
+        else:
+            out[ti, ri] += val  # accumulate duplicates conservatively
+    if np.isnan(out).any():
+        return None
+    return out
+
+
+def _parse_egslst(
+    path: Path, grid: KernelGrid, energy_mev: float, ncases_hint: Optional[int]
+) -> np.ndarray:
+    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    start = None
+    header = None
+    for i, line in enumerate(lines):
+        if "ENERGY DEPOSITION KERNEL" in line.upper():
+            start = i
+            continue
+        if start is not None and header is None:
+            if "ANGLE" in line.upper() and "RADIUS" in line.upper():
+                header = i
+                break
+    if header is None:
+        raise ValueError("ENERGY DEPOSITION KERNEL section not found")
+
+    rows: List[Tuple[float, float, float]] = []
+    for line in lines[header + 1 :]:
+        nums = float_pat.findall(line)
+        if len(nums) < 3:
+            if rows:
+                break
+            else:
+                continue
+        theta = float(nums[0])
+        radius = float(nums[1])
+        total_val = float(nums[2])
+        rows.append((theta, radius, total_val))
+
+    if len(rows) < grid.nTheta * grid.nR:
+        raise ValueError(
+            f"Too few rows in {path}: {len(rows)} < expected {grid.nTheta * grid.nR}"
+        )
+
+    arr = _map_rows_to_grid(rows, grid, use_centers=False) or _map_rows_to_grid(
+        rows, grid, use_centers=True
+    )
+    if arr is None:
+        raise ValueError("Failed to map egslst rows to grid")
+
+    # Determine whether totals are per-history or accumulated
+    sum_raw = float(arr.sum())
+    per_history = sum_raw / max(energy_mev, 1e-6) < 2.0
+    if ncases_hint is None:
+        ncases_hint = 0
+    if not per_history and ncases_hint > 0:
+        arr = arr / ncases_hint
+
+    # Convert to dimensionless fraction of incident energy
+    arr = arr / energy_mev
+    return arr
+
+
 def read_3d_table(
     e_dir: Path, grid: KernelGrid, energy_mev: float, cfg: Dict[str, Any]
 ) -> tuple[np.ndarray, str, bool]:
@@ -52,6 +133,15 @@ def read_3d_table(
             return arr, egsdat_files[0].name, True
         except Exception as exc:
             print(f"Warning: failed to parse {egsdat_files[0]} ({exc}); trying legacy parsers")
+
+    egslst_files = list(e_dir.glob("*.egslst"))
+    if egslst_files:
+        ncases_hint = int(cfg.get("histories_per_energy", cfg.get("ncases", 0)))
+        try:
+            arr = _parse_egslst(egslst_files[0], grid, energy_mev, ncases_hint)
+            return arr, egslst_files[0].name, True
+        except Exception as exc:
+            print(f"Warning: failed to parse {egslst_files[0]} ({exc}); trying legacy parsers")
 
     expected = grid.nTheta * grid.nR
     legacy_candidates = [

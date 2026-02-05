@@ -2,7 +2,6 @@
 import argparse
 from pathlib import Path
 import numpy as np
-import math
 import random
 from typing import List
 from common import load_config, default_grid_from_config, ensure_dir
@@ -16,8 +15,20 @@ def format_csv(vals: List[float], per_line: int = 8) -> str:
     return "\n        ".join(lines)
 
 
+def format_radii_multiline(r_edges_cm: np.ndarray, per_line: int = 10) -> str:
+    # r_edges_cm includes 0; RADII expects outer edges (exclude 0)
+    radii = [float(r) for r in r_edges_cm[1:]]
+    lines = []
+    for i in range(0, len(radii), per_line):
+        chunk = radii[i : i + per_line]
+        line = ", ".join(f"{v:.6g}" for v in chunk)
+        if i + per_line < len(radii):
+            line += ","
+        lines.append(line)
+    return "\n        ".join(lines)
+
+
 def write_edk_input(out_path: Path, energy: float, grid, cfg):
-    radii_cm = grid.r_edges[1:]
     histories = int(cfg.get("histories_per_energy", cfg.get("ncases", 2_00_000_000)))
     rng_seeds = cfg.get("rng_seeds")
     if not rng_seeds:
@@ -31,12 +42,18 @@ def write_edk_input(out_path: Path, energy: float, grid, cfg):
     ecut = cfg.get("ecut_MeV", 0.521)
     pcut = cfg.get("pcut_MeV", 0.010)
 
-    # cones: use uniform delta theta list length nTheta
-    delta_theta = float(cfg.get("delta_theta_deg", grid.theta_edges[1] - grid.theta_edges[0]))
-    angles_list = [delta_theta]
-    # spheres: use outer radii
-    n_spheres = grid.nR
-    total_regions = 1 + grid.nTheta * n_spheres
+    # cones: use angular widths; if uniform emit single entry (EDKnrc expands)
+    theta_widths = np.diff(grid.theta_edges)
+    if np.allclose(theta_widths, theta_widths[0], rtol=0, atol=1e-6):
+        angles_block = f"{theta_widths[0]:.6g}"
+    else:
+        angles_block = format_csv(theta_widths.tolist())
+
+    # spheres: explicit outer radii list (with trailing commas to force multiline read)
+    radii_block = format_radii_multiline(
+        grid.r_edges, per_line=int(cfg.get("radii_per_line", 10))
+    )
+    total_regions = 1 + grid.nTheta * grid.nR
 
     content = f"""
 TITLE= Energy deposition kernel for {energy:.3f} MeV photons
@@ -57,10 +74,9 @@ DOPPLER BROADENING= On
 
 :start geometrical inputs:
  NUMBER OF CONES= {grid.nTheta}
- ANGLES= {format_csv(angles_list)}
+ ANGLES= {angles_block}
 
- NUMBER OF SPHERES= {n_spheres}
- RADII= {format_csv(list(radii_cm), per_line=len(radii_cm))}
+ RADII= {radii_block}
  CAVITY ZONES= 0
 
 MEDIA= {medium};
@@ -115,9 +131,14 @@ def main():
     if args.ncones:
         cfg["ncones_theta"] = args.ncones
     if args.dr_mm:
-        cfg["dr_mm"] = args.dr_mm
-    if args.rmax_cm:
-        cfg["rmax_cm"] = args.rmax_cm
+        cfg.setdefault("radial", {"mode": "uniform"})
+        cfg["radial"]["mode"] = "uniform"
+        cfg["radial"]["dr_mm"] = args.dr_mm
+        if args.rmax_cm:
+            cfg["radial"]["rmax_cm"] = args.rmax_cm
+    elif args.rmax_cm:
+        cfg.setdefault("radial", {"mode": "uniform"})
+        cfg["radial"]["rmax_cm"] = args.rmax_cm
 
     grid = default_grid_from_config(cfg)
     work_dir = Path(args.work_dir)
@@ -134,8 +155,7 @@ def main():
             "input_path": str(input_path),
             "theta_max_deg": float(cfg.get("theta_max_deg", 180.0)),
             "ncones": grid.nTheta,
-            "dr_cm": float(grid.r_edges[1] - grid.r_edges[0]),
-            "rmax_cm": float(grid.r_edges[-1]),
+            "r_edges_cm": grid.r_edges.tolist(),
         }
         (e_dir / "metadata.json").write_text(
             __import__("json").dumps(meta, indent=2), encoding="utf-8"

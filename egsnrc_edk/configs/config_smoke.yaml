@@ -1,8 +1,10 @@
 energies_MeV: [1.0, 2.0]
 ncones_theta: 8
 theta_max_deg: 180.0
-dr_mm: 1.0
-rmax_cm: 2.0
+radial:
+  mode: uniform
+  dr_mm: 1.0
+  rmax_cm: 2.0
 ncases: 20000
 ifull: 1
 n_batch: 1

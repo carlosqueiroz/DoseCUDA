@@ -34,9 +34,13 @@ delta_theta_deg: 3.75
 # theta grid from 0 to 180 deg; CCCS can consume 0-90 by folding if needed
 theta_max_deg: 180.0
 
-# radial grid
-dr_mm: 0.5
-rmax_cm: 20.0
+# radial grid (segmented: fine core, coarser tail; switch to uniform if desired)
+radial:
+  mode: segmented
+  segments:
+    - { rmax_cm: 2.0,  dr_mm: 0.5 }
+    - { rmax_cm: 5.0,  dr_mm: 1.0 }
+    - { rmax_cm: 20.0, dr_mm: 2.5 }
 
 # transport / simulation params
 ncases: 200000000   # 2e8 histories (adjust for runtime)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 from pathlib import Path
+import json
 import numpy as np
 import pandas as pd
 from common import load_config, default_grid_from_config, KernelGrid
@@ -14,6 +15,7 @@ def main():
     ap.add_argument("--out", default="./kernel_poly.bin")
     ap.add_argument("--cumulative", action="store_true")
     ap.add_argument("--layout", default="E-major")
+    ap.add_argument("--tag", default=None, help="Tag to embed in layout/header for spectrum provenance")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -54,15 +56,34 @@ def main():
         cumulative=(name == "kcum"),
     )
 
+    tag = args.tag or Path(args.spectrum).stem[:12]
+    layout = args.layout
+    if layout.lower().startswith("e-major"):
+        layout = f"poly:{tag}"
+
+    out_path = Path(args.out)
     pack_binary(
-        Path(args.out),
+        out_path,
         grid_poly,
         k[None, ...],
         cumulative=(name == "kcum"),
-        layout=args.layout,
+        layout=layout,
         normalization=normalization,
     )
-    print(f"[poly] wrote {args.out} using spectrum {args.spectrum}")
+
+    meta = {
+        "spectrum_file": str(args.spectrum),
+        "tag": tag,
+        "grid_energies_MeV": grid.energies,
+        "interp_weights": w_interp.tolist(),
+        "original_energies_MeV": energies.tolist(),
+        "original_weights": weights.tolist(),
+        "cumulative": name == "kcum",
+        "normalization": normalization,
+    }
+    out_meta = out_path.with_suffix(out_path.suffix + ".json")
+    out_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"[poly] wrote {out_path} + {out_meta} using spectrum {args.spectrum}")
 
 
 if __name__ == "__main__":

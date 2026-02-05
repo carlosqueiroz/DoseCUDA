@@ -50,6 +50,11 @@ python3 /app/scripts/pack_kernels.py \
   --out "$OUTDIR/kernels_mono.bin" \
   --use-cumulative
 
+if [[ "${SANITY_CHECK:-1}" == "1" ]]; then
+  echo "[make_mono] sanity check"
+  python3 /app/scripts/sanity_check.py "$OUTDIR/kernels_mono.bin"
+fi
+
 echo "[make_mono] copying logs to $OUTDIR/logs"
 mkdir -p "$OUTDIR/logs"
 cp -r /scratch/logs/* "$OUTDIR/logs/" || true

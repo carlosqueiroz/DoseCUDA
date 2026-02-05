@@ -31,8 +31,12 @@ energies_MeV:
 ncones_theta: 48
 theta_max_deg: 180.0
 
-dr_mm: 0.5
-rmax_cm: 20.0
+radial:
+  mode: segmented
+  segments:
+    - { rmax_cm: 2.0,  dr_mm: 0.5 }
+    - { rmax_cm: 5.0,  dr_mm: 1.0 }
+    - { rmax_cm: 20.0, dr_mm: 2.5 }
 
 ncases: 50000         # reduced for quick validation
 ifull: 1

@@ -1,8 +1,8 @@
 import yaml
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import numpy as np
 
 
@@ -61,16 +61,55 @@ def build_theta_edges(ncones: int, theta_max_deg: float) -> np.ndarray:
     return np.linspace(0.0, theta_max_deg, ncones + 1, dtype=float)
 
 
-def build_r_edges(dr_cm: float, rmax_cm: float) -> np.ndarray:
-    n_bins = int(np.ceil(rmax_cm / dr_cm))
+def _build_r_edges_uniform(dr_cm: float, rmax_cm: float) -> np.ndarray:
+    n_bins_float = rmax_cm / dr_cm
+    n_bins = int(round(n_bins_float))
+    if abs(n_bins_float - n_bins) > 1e-6:
+        raise ValueError(
+            f"rmax_cm/dr_cm is not integer (got {n_bins_float}); adjust dr or rmax"
+        )
     return np.linspace(0.0, n_bins * dr_cm, n_bins + 1, dtype=float)
+
+
+def _build_r_edges_segmented(segments: List[Dict[str, Any]]) -> np.ndarray:
+    edges: List[float] = [0.0]
+    for seg in segments:
+        rmax_cm = float(seg["rmax_cm"])
+        dr_cm = float(seg["dr_mm"]) / 10.0
+        if dr_cm <= 0 or rmax_cm <= edges[-1]:
+            raise ValueError(f"Invalid radial segment: {seg}")
+        span = rmax_cm - edges[-1]
+        n_steps = int(round(span / dr_cm))
+        if abs(span - n_steps * dr_cm) > 1e-6:
+            raise ValueError(
+                f"Segment {seg} not an integer multiple of dr; span={span}, dr={dr_cm}"
+            )
+        new_edges = list(edges[-1] + np.arange(1, n_steps + 1) * dr_cm)
+        edges.extend(new_edges)
+    # Deduplicate tiny overlaps
+    edges = [edges[0]] + [e for i, e in enumerate(edges[1:]) if e - edges[i] > 1e-9]
+    return np.array(edges, dtype=float)
 
 
 def default_grid_from_config(cfg: Dict[str, Any]) -> KernelGrid:
     theta_max = float(cfg.get("theta_max_deg", 180.0))
     theta_edges = build_theta_edges(int(cfg["ncones_theta"]), theta_max)
-    dr_cm = float(cfg["dr_mm"]) / 10.0
-    r_edges = build_r_edges(dr_cm, float(cfg["rmax_cm"]))
+
+    radial_cfg = cfg.get("radial")
+    if radial_cfg and radial_cfg.get("mode") == "segmented":
+        segments = radial_cfg.get("segments", [])
+        if not segments:
+            raise ValueError("radial.mode=segmented requires segments")
+        r_edges = _build_r_edges_segmented(segments)
+    else:
+        dr_cm = float(
+            (radial_cfg or {}).get("dr_mm", cfg.get("dr_mm", 1.0))
+        ) / 10.0
+        rmax_cm = float(
+            (radial_cfg or {}).get("rmax_cm", cfg.get("rmax_cm", 10.0))
+        )
+        r_edges = _build_r_edges_uniform(dr_cm, rmax_cm)
+
     energies = [float(e) for e in cfg["energies_MeV"]]
     cumulative = bool(cfg.get("write_cumulative", True))
     return KernelGrid(energies=energies, theta_edges=theta_edges, r_edges=r_edges, cumulative=cumulative)

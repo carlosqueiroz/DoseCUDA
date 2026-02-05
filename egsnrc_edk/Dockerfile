@@ -33,7 +33,8 @@ RUN set -eux; \
 RUN sed -i 's/REPLACE {$MAXRADII} WITH   {65}/REPLACE {$MAXRADII} WITH   {450}/' /opt/EGSnrc/HEN_HOUSE/user_codes/edknrc/edknrc.mortran && \
     sed -i 's/REPLACE {$MAXRADII+1} WITH {66}/REPLACE {$MAXRADII+1} WITH {451}/' /opt/EGSnrc/HEN_HOUSE/user_codes/edknrc/edknrc.mortran && \
     sed -i 's/REPLACE {$MAXRC} WITH      {65}/REPLACE {$MAXRC} WITH      {450}/' /opt/EGSnrc/HEN_HOUSE/user_codes/edknrc/edknrc.mortran && \
-    sed -i 's/REPLACE {$MXREG} WITH      {1153}/REPLACE {$MXREG} WITH      {50000}/' /opt/EGSnrc/HEN_HOUSE/user_codes/edknrc/edknrc.mortran
+    sed -i 's/REPLACE {$MXREG} WITH      {1153}/REPLACE {$MXREG} WITH      {50000}/' /opt/EGSnrc/HEN_HOUSE/user_codes/edknrc/edknrc.mortran && \
+    sed -i 's/REPLACE {$MAXCANGLE} WITH  {48}/REPLACE {$MAXCANGLE} WITH  {64}/' /opt/EGSnrc/HEN_HOUSE/user_codes/edknrc/edknrc.mortran
 
 ENV HEN_HOUSE=/opt/EGSnrc/HEN_HOUSE
 

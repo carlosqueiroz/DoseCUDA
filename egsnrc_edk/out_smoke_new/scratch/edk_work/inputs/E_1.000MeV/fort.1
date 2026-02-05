@@ -1,0 +1,358 @@
+================================================================================
+EGSnrc version 4 for x86_64-unknown-linux-gnu          Thu Feb  5 13:51:41 2026
+================================================================================
+configuration............................................docker
+configuration time.......................................2026-02-05 13:31:44 UTC
+app compile time.........................................2026-02-05 13:33:52 UTC
+git commit hash..........................................
+application..............................................edknrc
+pegs file................................................521icru on HEN_HOUSE
+using host...............................................ef0f9a8a3b38
+input file...............................................E_1.000MeV
+output file(s)...........................................E_1.000MeV
+================================================================================
+
+
+ EDKnrc   ON linux (docker) WITH EGSnrcMP.
+                   MAXIMUM NUMBER OF RADIAL AND DEPTH ZONES= 450  48
+ ==> Using default EII data compilation ik
+ ===> Photonuclear flag:   0
+ RAYLEIGH OPTION REQUESTED FOR MEDIUM NUMBER  1
+
+ Rayleigh data available for medium  1 in PEGS4 data set.
+
+(Re)-initializing photon cross sections with files from the series: xcom
+
+ Compton cross sections: default
+ Using Compton cross sections from /opt/EGSnrc/HEN_HOUSE/data/compton_sigma.data
+ Working on medium   1 ... 
+  ->  100 atomic ff values computed!
+OK
+
+Reading screened Rutherford MS data ...............  done 
+
+
+Reading spin data base from /opt/EGSnrc/HEN_HOUSE/data/spinms.data
+EGSnrc spin data, version 2.0   
+Data generated on a machine with 1234 endianess
+The endianess of this CPU is 1234
+=> will need to do byte swaping
+Ranges:      1.00   100.00  0.30054  1.00000
+
+
+  medium    1 .....................  done
+  
+  Medium            1  sige =    6.3784170227787529        6.1807995067678911       monotone =  F F
+  
+  Initializing tmxs for estepe =   0.25000000000000000       and ximax =   0.50000000000000000     
+  
+
+Bound Compton scattering requested, reading data ......  Done
+
+ Initializing Bound Compton scattering ......
+ Medium   1 has   5 shells: 
+   1    1   1  0.20000 0.116E+03     0.014
+   2   17   1  0.20000 0.155E+02     0.543
+   3   18   2  0.20000 0.793E+02     0.024
+   4   19   3  0.20000 0.479E+02     0.014
+   5   20   4  0.20000 0.479E+02     0.014
+ ...... Done.
+
+Output from subroutine EDGSET:
+==============================
+ Atomic relaxations requested! 
+
+ Reading simplified photo-absorption data ..... Done
+
+ Reading simplified relaxation data ..... Done
+
+ Reading parametrized XCOM photo cross section data ..... Done
+
+ Reading EADL relaxation data ......
+  Z =   1 has  1 shells
+  Z =   8 has  4 shells
+ ...... Done.
+
+  
+ eii_init: minimum threshold energy found:    1.0000000000000000E-002
+ *** EII requested but no shells with binding energies 
+     above the specified threshold found
+     => turning off EII
+ eii_init: number of shells to simulate EII:            0
+
+
+Opened EII data file /opt/EGSnrc/HEN_HOUSE/data/eii_ik.data
+ eii_init: reading EII data ...   OK 
+  
+ EGSnrc SUCCESSFULLY 'HATCHED' FOR ONE MEDIUM.
+ Energy deposition kernel for 1.000 MeV photons                                  
+ *******************************************************************************
+ *                                                                             *
+ *                                                                             *
+ *                               ************                                  *
+ *                               *          *                                  *
+ *                               *  EDKnrc  *                                  *
+ *                               *          *                                  *
+ *                               ************                                  *
+ *                                                                             *
+ *   Spherical-geometryEGSnrc user-code for scoring EDK and dose               *
+ *                                                                             *
+ *    EDKnrc was developed by the National Research Council ofCanada           *
+ *                                                                             *
+ *    It uses the EGSnrc MonteCarlo System developed at NRC                    *
+ *    (based on the EGS4 Code System developed by SLAC and NRC)                *
+ * running on linux (docker)                                                   *
+ *                                                                             *
+ *                                                   Thu Feb  5 13:51:41 2026  *
+ *******************************************************************************
+
+================================================================================
+
+                   Electron/Photon transport parameter
+
+================================================================================
+
+ Photon cross sections                                      xcom
+ Compton cross sections                                     default
+ Photon transport cutoff(MeV)                                    0.1000E-01
+ Pair angular sampling                                       SIM
+ Pair cross sections                                         BH 
+ Triplet production                                          Off
+ Bound Compton scattering                                    ON            
+ Radiative Compton corrections                               Off           
+ Rayleigh scattering                                         On            
+ Atomic relaxations                                          eadl          
+ Photoelectron angular sampling                              On            
+
+ Electron transport cutoff(MeV)                               0.5210
+ Bremsstrahlung cross sections                              BH  
+ Bremsstrahlung angular sampling                             KM 
+ Spin effects                                                On
+ Electron Impact Ionization                                  ik
+ Maxium electron step in cm (SMAX)                               0.1000E+11
+ Maximum fractional energy loss/step (ESTEPE)                0.2500
+ Maximum 1st elastic moment/step (XIMAX)                     0.5000
+ Boundary crossing algorithm                                 EXACT     
+ Skin-depth for boundary crossing (MFP)                      3.000    
+ Electron-step algorithm                                     PRESTA-II 
+
+================================================================================
+
+
+  ==> Doppler Broadening considered as implemented in EGSnrc
+
+================================================================================
+
+                   MONTE CARLO, TRANSPORT, AND SCATTER CONTROLS
+
+================================================================================
+
+
+                   max # of histories to RUN                    20000
+                   Max # of histories to ANALYZE                20000
+
+                   Incident Charge                              photons
+
+ KINETIC ENERGY OF THE INCIDENT BEAM:                          1.0000 MeV
+                   GLOBAL ELECTRON TRANSPORT CUT-OFF            0.521 (MeV)
+                   GLOBAL PHOTON TRANSPORT CUT-OFF              0.010 (MeV)
+
+================================================================================
+
+
+                   MATERIAL SUMMARY   1 MATERIALS USED
+
+
+================================================================================
+
+
+# MATERIAL  DENSITY(g/cm**3)      AE(MeV)    AP(MeV)         UE(MeV)    UP(MeV)
+ - --------  ----------------      -------    -------         -------    -------
+ 1   H2O521     1.000E+00           0.521      0.010          55.511     55.000
+
+TERMA PER FLUENCE FOR MONOENERGETIC PHOTONS ON MATERIALH2O521ICRU              
+--------------------------------------------------------
+
+T(   1.000)/Eo/Flu= (mu/rho) =  7.0663E-02 cm2/g <= with Rayleigh
+
+T(   1.000)/Eo/Flu= (mu/rho) =  7.0607E-02 cm2/g <= no Rayleigh
+
+ Energy deposition kernel for 1.000 MeV photons                                  
+
+NRCC CALCULATION USING EDKnrc(EGSnrc)   
+ ON linux (docker)                                     Thu Feb  5 13:51:41 2026
+
+
+*******************************************************************************
+
+
+                   EXECUTION INFORMATION AND WARNING MESSAGES
+
+
+*******************************************************************************
+
+
+USING EDKnrc(EGSnrc)   ON linux (docker) 
+ 
+
+********* NEW INPUT FILE *********
+
+ Starting shower simulation ...
+
+ Finished    10.0% of cases      0.1 secs elapsed
+ Finished    20.0% of cases      0.3 secs elapsed
+ Finished    30.0% of cases      0.4 secs elapsed
+ Finished    40.0% of cases      0.6 secs elapsed
+ Finished    50.0% of cases      0.7 secs elapsed
+ Finished    60.0% of cases      0.8 secs elapsed
+ Finished    70.0% of cases      1.0 secs elapsed
+ Finished    80.0% of cases      1.1 secs elapsed
+ Finished    90.0% of cases      1.2 secs elapsed
+ Finished   100.0% of cases      1.4 secs elapsed
+
+
+ time elapsed:     1.5 secs cputime =      1.4 secs hist/hour =      52177244.0
+
+
+
+          20000 histories run in     1.4
+  energy fraction Ftot =   0.455393 +/-   0.001929 [  0.4236 %]
+
+  energy fraction Fpri =   0.438822 +/-   0.001883 [  0.4290 %]
+
+  energy fraction Fsc1 =   0.015989 +/-   0.000442 [  2.7657 %]
+
+  energy fraction Fsc2 =   0.000483 +/-   0.000054 [ 11.2761 %]
+
+  energy fraction Fmsc =   0.000025 +/-   0.000009 [ 35.0392 %]
+
+  energy fraction Frad =   0.000074 +/-   0.000009 [ 11.8809 %]
+
+-----------------------------------
+=> SUM OF ALL COMPONENTS   0.455393
+
+ 100.000% of the photons were classified !!!
+
+   0.050% of the Compton interactions rejected !!!
+
+   0.054% of dep. energy in 1st sphere due to primary sub-threshold events
+
+   0.080% Rayleigh fraction RAY/TOT
+-----------------------------------
+                                                           
+ **********************************************************
+                                                           
+                    OUTPUT RESULTS                         
+                                                           
+ **********************************************************
+                                                           
+
+
+  cavity dose =    1.609827E+03 +/-    2.593324E+05 [ ******** % ]
+
+  whole cavity mass is :         0.0005g
+
+
+                    ENERGY DEPOSITION KERNEL
+                    ------------------------
+
+ angle/deg.  radius/cm    total [uncert]           primary [uncert]
+ ------------------------------------------------------------------------
+    22.50      0.1000    6.1904E-02 [  0.9538% ]  6.1824E-02 [  0.9550% ] 
+    22.50      0.2000    4.2752E-02 [  1.6044% ]  4.2388E-02 [  1.6140% ] 
+    22.50      0.3000    1.6365E-02 [  2.8492% ]  1.5951E-02 [  2.8894% ] 
+    22.50      0.4000    6.4029E-04 [ 13.3471% ]  2.7455E-04 [ 16.9159% ] 
+    22.50      0.5000    2.8412E-04 [ 23.4908% ]  0.0000E+00 [  0.0000% ] 
+    22.50      0.6000    3.1072E-04 [ 21.4772% ]  0.0000E+00 [  0.0000% ] 
+    22.50      0.7000    4.2691E-04 [ 19.6845% ]  0.0000E+00 [  0.0000% ] 
+    22.50      0.8000    3.7155E-04 [ 20.3238% ]  0.0000E+00 [  0.0000% ] 
+    22.50      0.9000    4.2172E-04 [ 18.6542% ]  0.0000E+00 [  0.0000% ] 
+    22.50      1.0000    3.2616E-04 [ 20.4917% ]  0.0000E+00 [  0.0000% ] 
+    45.00      0.1000    8.0545E-02 [  0.7969% ]  8.0347E-02 [  0.7982% ] 
+    45.00      0.2000    6.6030E-02 [  1.2133% ]  6.5566E-02 [  1.2202% ] 
+    45.00      0.3000    2.3999E-02 [  2.2504% ]  2.3413E-02 [  2.2815% ] 
+    45.00      0.4000    8.8764E-04 [ 10.9830% ]  2.7936E-04 [ 15.5401% ] 
+    45.00      0.5000    7.1131E-04 [ 13.9341% ]  0.0000E+00 [  0.0000% ] 
+    45.00      0.6000    6.4877E-04 [ 14.8618% ]  0.0000E+00 [  0.0000% ] 
+    45.00      0.7000    6.8856E-04 [ 14.2476% ]  0.0000E+00 [  0.0000% ] 
+    45.00      0.8000    6.3858E-04 [ 14.1440% ]  0.0000E+00 [  0.0000% ] 
+    45.00      0.9000    6.3767E-04 [ 15.0723% ]  0.0000E+00 [  0.0000% ] 
+    45.00      1.0000    5.5240E-04 [ 15.7412% ]  0.0000E+00 [  0.0000% ] 
+    67.50      0.1000    5.0120E-02 [  1.0552% ]  4.9836E-02 [  1.0556% ] 
+    67.50      0.2000    3.7743E-02 [  1.6590% ]  3.7346E-02 [  1.6671% ] 
+    67.50      0.3000    1.1086E-02 [  3.2351% ]  1.0753E-02 [  3.2955% ] 
+    67.50      0.4000    4.2186E-04 [ 15.4959% ]  7.7116E-05 [ 30.5230% ] 
+    67.50      0.5000    3.9248E-04 [ 16.7456% ]  0.0000E+00 [  0.0000% ] 
+    67.50      0.6000    3.5628E-04 [ 17.7479% ]  0.0000E+00 [  0.0000% ] 
+    67.50      0.7000    3.2464E-04 [ 19.8102% ]  0.0000E+00 [  0.0000% ] 
+    67.50      0.8000    2.7949E-04 [ 18.8172% ]  0.0000E+00 [  0.0000% ] 
+    67.50      0.9000    3.8741E-04 [ 17.8488% ]  0.0000E+00 [  0.0000% ] 
+    67.50      1.0000    2.7507E-04 [ 21.4551% ]  0.0000E+00 [  0.0000% ] 
+    90.00      0.1000    2.1818E-02 [  1.5864% ]  2.1616E-02 [  1.5931% ] 
+    90.00      0.2000    1.2928E-02 [  2.9212% ]  1.2745E-02 [  2.9441% ] 
+    90.00      0.3000    2.5895E-03 [  6.4590% ]  2.4182E-03 [  6.7756% ] 
+    90.00      0.4000    1.8806E-04 [ 18.9596% ]  0.0000E+00 [  0.0000% ] 
+    90.00      0.5000    2.0862E-04 [ 19.8168% ]  0.0000E+00 [  0.0000% ] 
+    90.00      0.6000    2.3103E-04 [ 17.8550% ]  0.0000E+00 [  0.0000% ] 
+    90.00      0.7000    1.7298E-04 [ 21.3193% ]  0.0000E+00 [  0.0000% ] 
+    90.00      0.8000    1.6147E-04 [ 20.3247% ]  0.0000E+00 [  0.0000% ] 
+    90.00      0.9000    2.3314E-04 [ 18.3016% ]  0.0000E+00 [  0.0000% ] 
+    90.00      1.0000    1.4165E-04 [ 22.0728% ]  0.0000E+00 [  0.0000% ] 
+   112.50      0.1000    7.3129E-03 [  2.7558% ]  7.1942E-03 [  2.7783% ] 
+   112.50      0.2000    3.0466E-03 [  5.7912% ]  2.9656E-03 [  5.9170% ] 
+   112.50      0.3000    3.6906E-04 [ 15.1411% ]  2.8502E-04 [ 18.2961% ] 
+   112.50      0.4000    1.3564E-04 [ 20.1500% ]  0.0000E+00 [  0.0000% ] 
+   112.50      0.5000    8.6432E-05 [ 26.0525% ]  0.0000E+00 [  0.0000% ] 
+   112.50      0.6000    1.0126E-04 [ 23.2796% ]  0.0000E+00 [  0.0000% ] 
+   112.50      0.7000    1.3338E-04 [ 20.6588% ]  0.0000E+00 [  0.0000% ] 
+   112.50      0.8000    9.5836E-05 [ 22.8921% ]  0.0000E+00 [  0.0000% ] 
+   112.50      0.9000    1.1624E-04 [ 21.4019% ]  0.0000E+00 [  0.0000% ] 
+   112.50      1.0000    8.7749E-05 [ 22.9745% ]  0.0000E+00 [  0.0000% ] 
+   135.00      0.1000    2.0505E-03 [  5.1416% ]  1.9846E-03 [  5.2430% ] 
+   135.00      0.2000    7.1942E-04 [ 11.8080% ]  6.5744E-04 [ 12.6794% ] 
+   135.00      0.3000    1.0196E-04 [ 20.4936% ]  2.7698E-05 [ 44.1036% ] 
+   135.00      0.4000    8.5533E-05 [ 21.9086% ]  0.0000E+00 [  0.0000% ] 
+   135.00      0.5000    4.8584E-05 [ 29.9671% ]  0.0000E+00 [  0.0000% ] 
+   135.00      0.6000    3.6388E-05 [ 27.7156% ]  0.0000E+00 [  0.0000% ] 
+   135.00      0.7000    4.9907E-05 [ 29.6670% ]  0.0000E+00 [  0.0000% ] 
+   135.00      0.8000    1.0905E-04 [ 19.8500% ]  0.0000E+00 [  0.0000% ] 
+   135.00      0.9000    6.9871E-05 [ 27.4051% ]  0.0000E+00 [  0.0000% ] 
+   135.00      1.0000    6.1054E-05 [ 24.2268% ]  0.0000E+00 [  0.0000% ] 
+   157.50      0.1000    5.4115E-04 [  9.6996% ]  5.0331E-04 [ 10.1989% ] 
+   157.50      0.2000    2.0547E-04 [ 21.9608% ]  1.8216E-04 [ 24.2816% ] 
+   157.50      0.3000    5.8606E-05 [ 36.6637% ]  2.6481E-05 [ 71.5469% ] 
+   157.50      0.4000    2.9983E-05 [ 31.8422% ]  0.0000E+00 [  0.0000% ] 
+   157.50      0.5000    6.8734E-05 [ 23.7221% ]  0.0000E+00 [  0.0000% ] 
+   157.50      0.6000    2.2200E-05 [ 31.7463% ]  0.0000E+00 [  0.0000% ] 
+   157.50      0.7000    2.7157E-05 [ 32.3178% ]  0.0000E+00 [  0.0000% ] 
+   157.50      0.8000    3.2745E-05 [ 33.0533% ]  0.0000E+00 [  0.0000% ] 
+   157.50      0.9000    2.8103E-05 [ 32.7620% ]  0.0000E+00 [  0.0000% ] 
+   157.50      1.0000    3.3798E-05 [ 31.9045% ]  0.0000E+00 [  0.0000% ] 
+   180.00      0.1000    1.0291E-04 [ 22.2092% ]  9.1780E-05 [ 24.1788% ] 
+   180.00      0.2000    8.3280E-05 [ 34.2390% ]  6.2925E-05 [ 43.4191% ] 
+   180.00      0.3000    3.6075E-05 [ 32.9054% ]  6.8281E-06 [100.0000% ] 
+   180.00      0.4000    9.4750E-06 [ 64.1849% ]  0.0000E+00 [  0.0000% ] 
+   180.00      0.5000    2.0709E-05 [ 43.5538% ]  0.0000E+00 [  0.0000% ] 
+   180.00      0.6000    1.5002E-05 [ 50.4420% ]  0.0000E+00 [  0.0000% ] 
+   180.00      0.7000    1.7007E-05 [ 41.0288% ]  0.0000E+00 [  0.0000% ] 
+   180.00      0.8000    1.0636E-05 [ 63.2840% ]  0.0000E+00 [  0.0000% ] 
+   180.00      0.9000    1.1741E-05 [ 51.8706% ]  0.0000E+00 [  0.0000% ] 
+   180.00      1.0000    2.1145E-05 [ 41.2735% ]  0.0000E+00 [  0.0000% ] 
+
+END OF RUN          Thu Feb  5 13:51:43 2026
+
+
+
+
+
+
+================================================================================
+Finished simulation
+
+  Elapsed time:                    1.6 s (  0.000 h)
+  CPU time:                        1.5 s (  0.000 h)
+  Ratio:                          1.023
+
+
+End of run                                             Thu Feb  5 13:51:43 2026
+================================================================================
