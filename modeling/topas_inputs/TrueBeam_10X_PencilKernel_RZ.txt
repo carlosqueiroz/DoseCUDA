@@ -1,0 +1,107 @@
+# ------------------------------------------------------------
+# PHSP 10X -> Aperture (tubo W com furo) -> WaterCyl
+# Score: EnergyDeposit em bins cilíndricos (R,Z) -> kedk_rz.csv
+# ------------------------------------------------------------
+
+i:Ts/NumberOfThreads = 24
+i:Ts/Run/Seed = 123456
+
+s:Ge/World/Type      = "TsBox"
+s:Ge/World/Material  = "G4_Galactic"
+d:Ge/World/HLX       = 300. cm
+d:Ge/World/HLY       = 300. cm
+d:Ge/World/HLZ       = 300. cm
+b:Ge/World/Invisible = "TRUE"
+
+# ----------------------
+# Fonte: Phase Space IAEA
+# ----------------------
+s:So/Phsp/Type               = "PhaseSpace"
+s:So/Phsp/Component          = "World"
+s:So/Phsp/PhaseSpaceFileName = "/phsp/VarianTrueBeam_v2/10X/TrueBeam_v2_10X_00"
+# PreCheck TRUE aborta cedo se o arquivo não existir, evitando rodar em branco
+b:So/Phsp/PhaseSpacePreCheck = "True"
+i:So/Phsp/PhaseSpaceMultipleUse  = 1   # limitado pelo PHSP (5.2e8) para ficar <1e9
+i:So/Phsp/NumberOfHistoriesInRun = 5000000
+
+# ----------------------
+# Aperture (tubo de tungstênio com furo)
+#
+# IMPORTANTE: deve ficar em z NEGATIVO para as partículas atravessarem
+# saindo do plano do PHSP e indo para o fantoma (como no seu macro de dose).
+#
+# Colocando centro em z = -3 cm com HLZ=3 cm -> ocupa z em [-6, 0]
+# Ou seja: exatamente "abaixo" do plano do PHSP.
+# ----------------------
+s:Ge/Aperture/Parent   = "World"
+s:Ge/Aperture/Type     = "TsCylinder"
+s:Ge/Aperture/Material = "G4_W"
+
+d:Ge/Aperture/RMin   = 0.05 cm     # furo (raio) = 0.5 mm
+d:Ge/Aperture/RMax   = 6.00 cm
+d:Ge/Aperture/HL     = 3.00 cm     # espessura total 6 cm
+d:Ge/Aperture/TransZ = -3.00 cm
+
+# ----------------------
+# Água: separar core (0-5 cm) e tail (anel 5-20 cm)
+# Ambos começam logo após o colimador (topo em z=-6.02)
+# ----------------------
+s:Ge/WaterCore/Parent   = "World"
+s:Ge/WaterCore/Type     = "TsCylinder"
+s:Ge/WaterCore/Material = "G4_WATER"
+d:Ge/WaterCore/RMin     = 0.0 cm
+d:Ge/WaterCore/RMax     = 5.0 cm
+d:Ge/WaterCore/HL       = 30.0 cm
+d:Ge/WaterCore/TransZ   = -36.02 cm
+
+s:Ge/WaterTail/Parent   = "World"
+s:Ge/WaterTail/Type     = "TsCylinder"
+s:Ge/WaterTail/Material = "G4_WATER"
+d:Ge/WaterTail/RMin     = 5.0 cm
+d:Ge/WaterTail/RMax     = 20.0 cm
+d:Ge/WaterTail/HL       = 30.0 cm
+d:Ge/WaterTail/TransZ   = -36.02 cm
+
+# Plano de referência (quase superfície) para normalizar por fluxo incidente
+s:Ge/EntrancePlane/Parent   = "World"
+s:Ge/EntrancePlane/Type     = "TsBox"
+s:Ge/EntrancePlane/Material = "G4_Galactic"
+d:Ge/EntrancePlane/HLX      = 1.0 cm
+d:Ge/EntrancePlane/HLY      = 1.0 cm
+d:Ge/EntrancePlane/HLZ      = 0.0005 cm   # 10 µm total
+d:Ge/EntrancePlane/TransZ   = -6.019 cm   # logo acima do topo da água (z=-6.02)
+
+s:Ph/Default/PhysicsList = "QGSP_BERT_EMZ"
+
+# ----------------------
+# Scoring RZ
+# ----------------------
+# Entrada (normalização por partículas atravessando o plano)
+s:Sc/EntranceFlux/Quantity                  = "SurfaceCurrent"
+s:Sc/EntranceFlux/Component                 = "EntrancePlane"
+s:Sc/EntranceFlux/Surface                   = "EntrancePlane/ZPlusSurface"
+s:Sc/EntranceFlux/OutputType                = "CSV"
+s:Sc/EntranceFlux/OutputFile                = "entrance_flux.csv"
+s:Sc/EntranceFlux/IfOutputFileAlreadyExists = "Overwrite"
+
+# Scoring RZ: miolo (alta resolução)
+s:Sc/KEDK_Core/Quantity                  = "EnergyDeposit"
+s:Sc/KEDK_Core/Component                 = "WaterCore"
+s:Sc/KEDK_Core/OutputType                = "CSV"
+s:Sc/KEDK_Core/OutputFile                = "kedk_rz_core.csv"
+s:Sc/KEDK_Core/IfOutputFileAlreadyExists = "Overwrite"
+
+i:Sc/KEDK_Core/RBins   = 600
+i:Sc/KEDK_Core/PhiBins = 1
+i:Sc/KEDK_Core/ZBins   = 600
+
+# Scoring RZ: cauda (mais leve)
+s:Sc/KEDK_Tail/Quantity                  = "EnergyDeposit"
+s:Sc/KEDK_Tail/Component                 = "WaterTail"
+s:Sc/KEDK_Tail/OutputType                = "CSV"
+s:Sc/KEDK_Tail/OutputFile                = "kedk_rz_tail.csv"
+s:Sc/KEDK_Tail/IfOutputFileAlreadyExists = "Overwrite"
+
+i:Sc/KEDK_Tail/RBins   = 200
+i:Sc/KEDK_Tail/PhiBins = 1
+i:Sc/KEDK_Tail/ZBins   = 600

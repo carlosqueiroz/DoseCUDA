@@ -1,0 +1,90 @@
+# Kernel efetivo (AAA-like) em água: gera matriz axissimétrica K(r,z)
+# Saída: kedk_rz.csv (EnergyDeposit) em bins cilíndricos (R,Z)
+
+# ----------------------
+# Execução / Run
+# ----------------------
+i:Ts/NumberOfThreads = 8
+i:Ts/Run/Seed = 123456
+
+# ----------------------
+# Mundo
+# ----------------------
+s:Ge/World/Type      = "TsBox"
+s:Ge/World/Material  = "G4_AIR"
+d:Ge/World/HLX       = 300. cm
+d:Ge/World/HLY       = 300. cm
+d:Ge/World/HLZ       = 300. cm
+b:Ge/World/Invisible = "TRUE"
+
+# ----------------------
+# Fantoma cilíndrico de água — topo em z=0, indo para z negativo
+# Total Z = 60 cm (HLZ=30), raio = 20 cm
+# ----------------------
+s:Ge/WaterCyl/Parent   = "World"
+s:Ge/WaterCyl/Type     = "TsCylinder"
+s:Ge/WaterCyl/Material = "G4_WATER"
+d:Ge/WaterCyl/RMin     = 0.0 cm
+d:Ge/WaterCyl/RMax     = 20.0 cm
+d:Ge/WaterCyl/HLZ      = 30.0 cm
+d:Ge/WaterCyl/TransZ   = -30.0 cm
+
+# ----------------------
+# Física
+# ----------------------
+s:Ph/Default/PhysicsList = "QGSP_BERT_EMZ"
+
+# ----------------------
+# Fonte: pencil beam paramétrico
+# ----------------------
+s:So/Pencil/Type      = "Beam"
+s:So/Pencil/Component = "World"
+
+# Histórias (mesmo padrão do seu PHSP)
+i:So/Pencil/NumberOfHistoriesInRun = 5000000
+
+# Partícula e energia (comece monoenergético; depois você varre energias)
+s:So/Pencil/BeamParticle = "gamma"
+d:So/Pencil/BeamEnergy   = 2.0 MeV
+
+# Posição da fonte: 1 cm acima do topo do fantoma
+# ---------- VARIANTE A (componentes X/Y/Z) ----------
+d:So/Pencil/BeamPositionX = 0.0 cm
+d:So/Pencil/BeamPositionY = 0.0 cm
+d:So/Pencil/BeamPositionZ = 1.0 cm
+
+# Direção: apontar para -Z (SEM os "1" que estavam errados)
+d:So/Pencil/BeamDirectionX = 0.0
+d:So/Pencil/BeamDirectionY = 0.0
+d:So/Pencil/BeamDirectionZ = -1.0
+
+# ---------- VARIANTE B (vetores) — use se o TOPAS reclamar da A ----------
+# d:So/Pencil/BeamPosition  = 0.0 0.0 1.0 cm
+# d:So/Pencil/BeamDirection = 0.0 0.0 -1.0
+
+# Spot size do pencil (gaussiano)
+# (se sua versão não aceitar BeamSigmaX/Y, veja alternativa logo abaixo)
+d:So/Pencil/BeamSigmaX = 0.05 cm   # 0.5 mm
+d:So/Pencil/BeamSigmaY = 0.05 cm
+
+# Alternativa caso sua versão use um único sigma:
+# d:So/Pencil/BeamSigma = 0.05 cm
+
+# Divergência ~0 (pencil quase paralelo)
+# (se a sua versão não aceitar, pode remover — não é crítico)
+d:So/Pencil/BeamAngularSpreadX = 0.0 deg
+d:So/Pencil/BeamAngularSpreadY = 0.0 deg
+
+# ----------------------
+# Scoring: EnergyDeposit em bins cilíndricos (R,Z)
+# ----------------------
+s:Sc/KEDK/Quantity                  = "EnergyDeposit"
+s:Sc/KEDK/Component                 = "WaterCyl"
+s:Sc/KEDK/OutputType                = "CSV"
+s:Sc/KEDK/OutputFile                = "kedk_rz.csv"
+s:Sc/KEDK/IfOutputFileAlreadyExists = "Overwrite"
+
+# Bins: dr=0.05 cm (0.5 mm), dz=0.10 cm (1 mm)
+i:Sc/KEDK/RBins   = 400
+i:Sc/KEDK/PhiBins = 1
+i:Sc/KEDK/ZBins   = 600

@@ -1,0 +1,461 @@
+%C80
+"#############################################################################"
+"                                                                             "
+"  EDK_SPHERE: Energy Deposition Kernel Generator for DoseCUDA                "
+"                                                                             "
+"  Based on SCASPH methodology (Mackie et al., 1988):                         "
+"  - Monoenergetic photon forced to interact at sphere center                 "
+"  - Energy deposition scored in spherical shells and angular cones           "
+"  - Output: K(r, theta) normalized per incident photon                       "
+"                                                                             "
+"  Reference:                                                                 "
+"  Mackie TR, Bielajew AF, Rogers DWO, Battista JJ. Generation of photon     "
+"  energy deposition kernels using the EGS Monte Carlo code. Phys Med Biol.  "
+"  1988;33(1):1-20.                                                           "
+"                                                                             "
+"#############################################################################"
+
+%L
+%Q1
+!COMMENTS;
+;
+
+"=============================================================================";
+" REPLACE statements for configuration                                         ";
+"=============================================================================";
+
+REPLACE {$MXMED} WITH {1};          "Only water";
+REPLACE {$MXREG} WITH {10000};      "Max regions (shells x cones)";
+REPLACE {$MXSTACK} WITH {50000};    "Particle stack size";
+REPLACE {$MXDATA} WITH {100};       "Data array size";
+
+"Shell and cone configuration - can be overridden";
+REPLACE {$NSHELL} WITH {60};        "Number of radial shells";
+REPLACE {$NCONE} WITH {48};         "Number of angular cones (3.75° each)";
+REPLACE {$RMAX} WITH {60.0};        "Maximum radius in cm";
+
+"=============================================================================";
+" Main program                                                                 ";
+"=============================================================================";
+
+program edk_sphere;
+
+implicit none;
+
+"EGSnrc required includes";
+$declare_max_medium;
+$INTEGER NCASE, IQIN, IRIN, IWATCH, ICALL;
+$REAL ESRC, XIN, YIN, ZIN, UIN, VIN, WIN, WTIN, EIN;
+$REAL LATCHI, ESRC_IN;
+
+"Scoring arrays";
+$REAL EDEP($NSHELL, $NCONE);       "Energy deposition per shell/cone";
+$REAL EDEP_PRIMARY($NSHELL, $NCONE); "Primary energy deposition";
+$REAL EDEP_SCATTER($NSHELL, $NCONE); "Scatter energy deposition";
+$REAL KERMA_TOT;                    "Total kerma for normalization";
+
+"Shell geometry";
+$REAL R_SHELL($NSHELL+1);          "Shell radii boundaries";
+$REAL THETA_CONE($NCONE+1);        "Cone angle boundaries";
+$REAL DR, DTHETA;                  "Shell/cone increments";
+$REAL VOL($NSHELL, $NCONE);        "Volume of each scoring element";
+
+"Simulation parameters";
+$INTEGER NHISTORY;                  "Number of histories";
+$REAL ECUT_LOCAL, PCUT_LOCAL;      "Local cutoff energies";
+
+"Output file";
+$INTEGER OUNIT;
+CHARACTER*256 OUTFILE;
+
+"Counters and temporaries";
+$INTEGER I, J, ISHELL, ICONE;
+$REAL PI, R, THETA, X, Y, Z;
+$REAL TOTAL_EDEP, NORM_FACTOR;
+
+"=============================================================================";
+" Initialize                                                                   ";
+"=============================================================================";
+
+PI = 3.14159265358979;
+
+"Set defaults - can be overridden by input file";
+NHISTORY = 1000000;  "1M histories for good statistics";
+ESRC = 1.0;          "1 MeV default, will be set from input";
+ECUT_LOCAL = 0.521;  "Electron cutoff in MeV (ICRU 521)";
+PCUT_LOCAL = 0.010;  "Photon cutoff in MeV";
+
+"Read simulation parameters from input file if available";
+CALL READ_INPUT(NHISTORY, ESRC, OUTFILE);
+
+ESRC_IN = ESRC;
+
+"=============================================================================";
+" Initialize geometry: spherical shells and angular cones                      ";
+"=============================================================================";
+
+"Logarithmic shell spacing for better resolution near center";
+"Linear spacing would be: DR = $RMAX / $NSHELL";
+
+CALL INIT_SHELL_GEOMETRY(R_SHELL, $NSHELL, $RMAX);
+
+"Uniform angular cone spacing";
+DTHETA = PI / $NCONE;
+DO I = 1, $NCONE + 1 [
+    THETA_CONE(I) = (I - 1) * DTHETA;
+]
+
+"Calculate volumes for normalization";
+CALL CALC_VOLUMES(R_SHELL, THETA_CONE, VOL, $NSHELL, $NCONE);
+
+"=============================================================================";
+" Initialize EGSnrc                                                            ";
+"=============================================================================";
+
+CALL HATCH;
+
+"Set cutoff energies for all regions";
+DO I = 1, $MXREG [
+    ECUT(I) = ECUT_LOCAL;
+    PCUT(I) = PCUT_LOCAL;
+]
+
+"Initialize scoring arrays";
+DO I = 1, $NSHELL [
+    DO J = 1, $NCONE [
+        EDEP(I, J) = 0.0;
+        EDEP_PRIMARY(I, J) = 0.0;
+        EDEP_SCATTER(I, J) = 0.0;
+    ]
+]
+KERMA_TOT = 0.0;
+
+"=============================================================================";
+" Main simulation loop                                                         ";
+"=============================================================================";
+
+OUTPUT NHISTORY, ESRC;
+(' Starting EDK simulation with ', I10, ' histories at ', F8.3, ' MeV');
+
+DO NCASE = 1, NHISTORY [
+
+    "Progress output every 100k histories";
+    IF (MOD(NCASE, 100000) .EQ. 0) [
+        OUTPUT NCASE;
+        (' Completed ', I10, ' histories');
+    ]
+
+    "==========================================================================";
+    " Source: Photon at center, forced first interaction                       ";
+    "==========================================================================";
+
+    "Initial position: sphere center";
+    XIN = 0.0;
+    YIN = 0.0;
+    ZIN = 0.0;
+
+    "Isotropic direction";
+    CALL ISOTROPIC_DIRECTION(UIN, VIN, WIN);
+
+    "Initial energy and particle type";
+    EIN = ESRC;
+    IQIN = 0;   "Photon";
+    IRIN = 1;   "Start region";
+    WTIN = 1.0; "Weight";
+    LATCHI = 0; "Latch for primary/scatter tracking";
+
+    "==========================================================================";
+    " Force first interaction at center                                         ";
+    "==========================================================================";
+
+    "Sample interaction type based on cross-sections";
+    "Then transport resulting particles through water sphere";
+
+    CALL FORCE_INTERACTION(ESRC, XIN, YIN, ZIN, UIN, VIN, WIN);
+
+]
+
+"=============================================================================";
+" Normalize and output results                                                 ";
+"=============================================================================";
+
+"Calculate total deposited energy";
+TOTAL_EDEP = 0.0;
+DO I = 1, $NSHELL [
+    DO J = 1, $NCONE [
+        TOTAL_EDEP = TOTAL_EDEP + EDEP(I, J);
+    ]
+]
+
+"Normalization: per incident photon, per MeV, per cm^3";
+NORM_FACTOR = 1.0 / (NHISTORY * ESRC);
+
+OUTPUT TOTAL_EDEP, TOTAL_EDEP/NHISTORY, TOTAL_EDEP/(NHISTORY*ESRC);
+(' Total energy deposited: ', E12.5, ' MeV');
+(' Per history: ', E12.5, ' MeV');
+(' Normalized (per MeV incident): ', E12.5);
+
+"Write output file";
+CALL WRITE_KERNEL_OUTPUT(OUTFILE, R_SHELL, THETA_CONE, EDEP, VOL,
+                          NHISTORY, ESRC, $NSHELL, $NCONE, NORM_FACTOR);
+
+OUTPUT;
+(' EDK simulation complete. Output written to: ', A);
+
+END;
+
+"=============================================================================";
+" Subroutine: Initialize shell geometry (logarithmic spacing)                  ";
+"=============================================================================";
+SUBROUTINE INIT_SHELL_GEOMETRY(R_SHELL, NSHELL, RMAX);
+
+$REAL R_SHELL(*), RMAX;
+$INTEGER NSHELL;
+$INTEGER I;
+$REAL RMIN, LOG_RMIN, LOG_RMAX, DLOG;
+
+"Logarithmic spacing from 0.01 cm to RMAX";
+RMIN = 0.01;  "Minimum radius 0.1 mm";
+LOG_RMIN = LOG10(RMIN);
+LOG_RMAX = LOG10(RMAX);
+DLOG = (LOG_RMAX - LOG_RMIN) / NSHELL;
+
+R_SHELL(1) = 0.0;  "First shell includes center";
+DO I = 2, NSHELL + 1 [
+    R_SHELL(I) = 10.0 ** (LOG_RMIN + (I - 1) * DLOG);
+]
+
+RETURN;
+END;
+
+"=============================================================================";
+" Subroutine: Calculate volumes of scoring elements                            ";
+"=============================================================================";
+SUBROUTINE CALC_VOLUMES(R_SHELL, THETA_CONE, VOL, NSHELL, NCONE);
+
+$REAL R_SHELL(*), THETA_CONE(*), VOL(NSHELL, *);
+$INTEGER NSHELL, NCONE;
+$INTEGER I, J;
+$REAL R1, R2, TH1, TH2, DVOL;
+$REAL PI;
+
+PI = 3.14159265358979;
+
+DO I = 1, NSHELL [
+    R1 = R_SHELL(I);
+    R2 = R_SHELL(I + 1);
+    DO J = 1, NCONE [
+        TH1 = THETA_CONE(J);
+        TH2 = THETA_CONE(J + 1);
+        "Volume of spherical shell segment";
+        DVOL = (2.0 * PI / 3.0) * (R2**3 - R1**3) *
+               (COS(TH1) - COS(TH2));
+        VOL(I, J) = ABS(DVOL);
+    ]
+]
+
+RETURN;
+END;
+
+"=============================================================================";
+" Subroutine: Generate isotropic direction                                     ";
+"=============================================================================";
+SUBROUTINE ISOTROPIC_DIRECTION(U, V, W);
+
+$REAL U, V, W;
+$REAL RNG1, RNG2, PHI, COSTH, SINTH;
+$REAL PI;
+
+PI = 3.14159265358979;
+
+"Sample uniformly on unit sphere";
+CALL RANDOMSET(RNG1);
+CALL RANDOMSET(RNG2);
+
+COSTH = 2.0 * RNG1 - 1.0;
+SINTH = SQRT(1.0 - COSTH * COSTH);
+PHI = 2.0 * PI * RNG2;
+
+U = SINTH * COS(PHI);
+V = SINTH * SIN(PHI);
+W = COSTH;
+
+RETURN;
+END;
+
+"=============================================================================";
+" Subroutine: Read input parameters from file                                  ";
+"=============================================================================";
+SUBROUTINE READ_INPUT(NHISTORY, ESRC, OUTFILE);
+
+$INTEGER NHISTORY;
+$REAL ESRC;
+CHARACTER*256 OUTFILE;
+$INTEGER IOS;
+CHARACTER*256 LINE;
+
+"Default output file";
+WRITE(OUTFILE, '(A)') 'kernel_output.dat';
+
+"Try to read from standard input or input file";
+OPEN(UNIT=5, FILE='edk_input.txt', STATUS='OLD', IOSTAT=IOS);
+IF (IOS .EQ. 0) [
+    READ(5, *, IOSTAT=IOS) NHISTORY;
+    READ(5, *, IOSTAT=IOS) ESRC;
+    READ(5, '(A)', IOSTAT=IOS) OUTFILE;
+    CLOSE(5);
+    OUTPUT NHISTORY, ESRC;
+    (' Read from input: NHISTORY=', I10, ', ESRC=', F10.4, ' MeV');
+]
+ELSE [
+    OUTPUT;
+    (' Using default parameters (no input file found)');
+]
+
+RETURN;
+END;
+
+"=============================================================================";
+" Subroutine: Write kernel output in DoseCUDA-compatible format                ";
+"=============================================================================";
+SUBROUTINE WRITE_KERNEL_OUTPUT(OUTFILE, R_SHELL, THETA_CONE, EDEP, VOL,
+                                NHISTORY, ESRC, NSHELL, NCONE, NORM);
+
+CHARACTER*256 OUTFILE;
+$REAL R_SHELL(*), THETA_CONE(*), EDEP(NSHELL, *), VOL(NSHELL, *);
+$INTEGER NHISTORY, NSHELL, NCONE;
+$REAL ESRC, NORM;
+
+$INTEGER I, J, OUNIT;
+$REAL R_MID, TH_MID, K_VAL;
+$REAL PI;
+
+PI = 3.14159265358979;
+OUNIT = 20;
+
+OPEN(UNIT=OUNIT, FILE=OUTFILE, STATUS='UNKNOWN');
+
+"Header";
+WRITE(OUNIT, '(A)') '# EDK_SPHERE Output - Energy Deposition Kernel';
+WRITE(OUNIT, '(A,F10.4)') '# Source Energy (MeV): ', ESRC;
+WRITE(OUNIT, '(A,I12)') '# Number of histories: ', NHISTORY;
+WRITE(OUNIT, '(A,I6)') '# Number of shells: ', NSHELL;
+WRITE(OUNIT, '(A,I6)') '# Number of cones: ', NCONE;
+WRITE(OUNIT, '(A)') '# Columns: r_mid(cm), theta_mid(deg), K(MeV/cm3/MeV_incident)';
+WRITE(OUNIT, '(A)') 'r_cm,theta_deg,K_normalized';
+
+"Data";
+DO I = 1, NSHELL [
+    R_MID = 0.5 * (R_SHELL(I) + R_SHELL(I + 1));
+    DO J = 1, NCONE [
+        TH_MID = 0.5 * (THETA_CONE(J) + THETA_CONE(J + 1));
+        TH_MID = TH_MID * 180.0 / PI;  "Convert to degrees";
+
+        "Kernel value: energy per volume, normalized";
+        IF (VOL(I, J) .GT. 0.0) [
+            K_VAL = EDEP(I, J) / VOL(I, J) * NORM;
+        ]
+        ELSE [
+            K_VAL = 0.0;
+        ]
+
+        WRITE(OUNIT, '(F12.6, A, F12.4, A, E15.6)')
+              R_MID, ',', TH_MID, ',', K_VAL;
+    ]
+]
+
+CLOSE(OUNIT);
+
+RETURN;
+END;
+
+"=============================================================================";
+" Ausgab subroutine: Score energy deposition                                   ";
+"=============================================================================";
+SUBROUTINE AUSGAB(IARG);
+
+$INTEGER IARG;
+
+"Common blocks for EGSnrc";
+COMIN/STACK,EPCONT,USEFUL,RANDOM,SCORE/;
+
+$REAL X, Y, Z, R, COSTH;
+$INTEGER ISHELL, ICONE;
+$REAL EDEP_LOCAL;
+$REAL PI;
+
+COMMON/SCORING/EDEP($NSHELL,$NCONE);
+COMMON/GEOMETRY/R_SHELL($NSHELL+1),THETA_CONE($NCONE+1);
+
+PI = 3.14159265358979;
+
+"Score on energy deposition events";
+IF (IARG .EQ. 0) [
+    "Get particle position";
+    X = X(NP);
+    Y = Y(NP);
+    Z = Z(NP);
+    EDEP_LOCAL = EDEP(NP);
+
+    "Calculate spherical coordinates";
+    R = SQRT(X*X + Y*Y + Z*Z);
+    IF (R .GT. 0.0) [
+        COSTH = Z / R;
+    ]
+    ELSE [
+        COSTH = 1.0;  "At center, assign to first cone";
+    ]
+
+    "Find shell index";
+    ISHELL = 0;
+    DO I = 1, $NSHELL [
+        IF (R .GE. R_SHELL(I) .AND. R .LT. R_SHELL(I+1)) [
+            ISHELL = I;
+            EXIT;
+        ]
+    ]
+
+    "Find cone index (theta from +Z axis)";
+    ICONE = 0;
+    DO J = 1, $NCONE [
+        IF (ACOS(COSTH) .GE. THETA_CONE(J) .AND.
+            ACOS(COSTH) .LT. THETA_CONE(J+1)) [
+            ICONE = J;
+            EXIT;
+        ]
+    ]
+
+    "Score energy deposition";
+    IF (ISHELL .GT. 0 .AND. ISHELL .LE. $NSHELL .AND.
+        ICONE .GT. 0 .AND. ICONE .LE. $NCONE) [
+        EDEP(ISHELL, ICONE) = EDEP(ISHELL, ICONE) + EDEP_LOCAL;
+    ]
+]
+
+RETURN;
+END;
+
+"=============================================================================";
+" Subroutine: Force first interaction (simplified)                             ";
+"=============================================================================";
+SUBROUTINE FORCE_INTERACTION(E, X, Y, Z, U, V, W);
+
+$REAL E, X, Y, Z, U, V, W;
+
+"This is a placeholder - actual implementation requires full EGSnrc";
+"transport machinery. The real code would:";
+"1. Sample interaction type (Compton, pair, photo) based on cross-sections";
+"2. Set up initial particles on stack";
+"3. Call SHOWER to transport them";
+
+"For the actual EDK calculation, use the DOSE_SCORING user code";
+"from EGSnrc with appropriate geometry modifications";
+
+CALL SHOWER(0, E, X, Y, Z, U, V, W, 1, 0);
+
+RETURN;
+END;
+
+"=============================================================================";
+" End of EDK_SPHERE usercode                                                   ";
+"=============================================================================";

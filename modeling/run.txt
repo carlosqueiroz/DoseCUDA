@@ -1,0 +1,3 @@
+docker run --rm --gpus all -v $(pwd)/
+  │ phsp:/phsp -v $(pwd)/output:/output
+  │ topas-celeritas /workflow/topas_inputs/

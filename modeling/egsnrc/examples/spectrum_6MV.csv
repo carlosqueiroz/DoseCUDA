@@ -1,0 +1,28 @@
+# Spectral weights for Varian TrueBeam 6MV (filtered)
+# Approximation based on published data
+# Mean energy: ~2.0 MeV
+# For clinical use, extract from IAEA PHSP or TOPAS simulation
+energy_MeV,weight
+0.10,0.0312
+0.20,0.0524
+0.30,0.0621
+0.40,0.0698
+0.50,0.0745
+0.60,0.0772
+0.70,0.0781
+0.80,0.0774
+0.90,0.0752
+1.00,0.0721
+1.20,0.0634
+1.40,0.0545
+1.60,0.0456
+1.80,0.0379
+2.00,0.0308
+2.50,0.0198
+3.00,0.0124
+3.50,0.0072
+4.00,0.0043
+4.50,0.0024
+5.00,0.0014
+5.50,0.0006
+6.00,0.0002

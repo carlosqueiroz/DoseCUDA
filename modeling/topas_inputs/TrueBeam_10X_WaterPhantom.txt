@@ -4,7 +4,7 @@
 # ----------------------
 # Execução / Run
 # ----------------------
-i:Ts/Run/NumberOfThreads = 8
+i:Ts/NumberOfThreads = 8
 i:Ts/Run/Seed = 123456
 
 # ----------------------
@@ -24,7 +24,7 @@ s:So/Phsp/Type               = "PhaseSpace"
 s:So/Phsp/Component          = "World"
 # Caminho base (sem extensão). Espera encontrar .header e .phsp
 s:So/Phsp/PhaseSpaceFileName = "/phsp/VarianTrueBeam_v2/10X/TrueBeam_v2_10X_00"
-b:So/Phsp/PhaseSpacePreCheck = "False"
+b:So/Phsp/PhaseSpacePreCheck = "True"
 i:So/Phsp/PhaseSpaceMultipleUse = 0          # 0 = usar arquivo inteiro uma vez
 i:So/Phsp/NumberOfHistoriesInRun = 2000000   # ajuste para convergência
 

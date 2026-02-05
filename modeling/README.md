@@ -57,13 +57,43 @@ Pré-requisitos: host com `nvidia-container-toolkit`, driver NVIDIA e suporte a 
 ```bash
 mkdir -p modeling/output
 docker run --rm --gpus all \
-  -v $(pwd)/modeling/phsp:/phsp \
-  -v $(pwd)/modeling/output:/output \
+  -v "$(pwd)/phsp:/phsp" \
+  -v "$(pwd)/output:/output" \
+  -v "$(pwd)/topas_inputs:/workflow/topas_inputs" \
+  topas-celeritas \
+  /workflow/topas_inputs/TrueBeam_10X_WaterPhantom.txt
+
+
+
+  docker run --rm --gpus all \
+  -v "$(pwd)/phsp:/phsp" \
+  -v "$(pwd)/output:/output" \
+  -v "$(pwd)/topas_inputs:/workflow/topas_inputs" \
+  topas-celeritas \
+  /workflow/topas_inputs/TrueBeam_10X_PencilKernel_RZ.txt
+
+  
+```
+
+O entrypoint (`/workflow/run.sh`) muda o diretório de trabalho para `/output`; os CSVs gerados pelo scorer do TOPAS aparecerão em `modeling/output/` no host.
+
+### Executar em background (sem interrupção por Ctrl+C)
+
+Não há `docker-compose` aqui; rode o contêiner destacado para evitar parar com SIGINT acidental:
+
+```bash
+docker run -d --name topas-10x --gpus all \
+  -v "$(pwd)/phsp:/phsp" \
+  -v "$(pwd)/output:/output" \
+  -v "$(pwd)/topas_inputs:/workflow/topas_inputs" \
   topas-celeritas \
   /workflow/topas_inputs/TrueBeam_10X_WaterPhantom.txt
 ```
 
-O entrypoint (`/workflow/run.sh`) muda o diretório de trabalho para `/output`; os CSVs gerados pelo scorer do TOPAS aparecerão em `modeling/output/` no host.
+- Logs em tempo real: `docker logs -f topas-10x`
+- Parar/limpar: `docker stop topas-10x && docker rm topas-10x`
+- Opcional: limitar threads com `-e TOPAS_THREADS=8`
+- Foreground sem interromper: substitua `-d` por `nohup ... &`
 
 ## Próximos passos (ligação com DoseCUDA)
 

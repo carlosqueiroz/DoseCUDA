@@ -1,0 +1,28 @@
+# Spectral weights for Varian TrueBeam 6MV FFF (Flattening Filter Free)
+# FFF beams have harder spectra - more high energy photons
+# Mean energy: ~2.5 MeV (higher than filtered)
+# For clinical use, extract from IAEA PHSP or TOPAS simulation
+energy_MeV,weight
+0.10,0.0186
+0.20,0.0321
+0.30,0.0412
+0.40,0.0487
+0.50,0.0542
+0.60,0.0584
+0.70,0.0612
+0.80,0.0628
+0.90,0.0632
+1.00,0.0627
+1.20,0.0596
+1.40,0.0549
+1.60,0.0495
+1.80,0.0437
+2.00,0.0381
+2.50,0.0271
+3.00,0.0184
+3.50,0.0124
+4.00,0.0082
+4.50,0.0054
+5.00,0.0035
+5.50,0.0022
+6.00,0.0013

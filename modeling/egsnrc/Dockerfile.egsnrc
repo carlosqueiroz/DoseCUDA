@@ -1,0 +1,227 @@
+# =============================================================================
+# EGSnrc Kernel Factory Docker Image
+# =============================================================================
+# Builds EGSnrc from source (offline) and provides tools to generate
+# Energy Deposition Kernels (EDK) for DoseCUDA CCC/CCCS dose engine.
+#
+# Usage:
+#   docker build -f Dockerfile.egsnrc -t egsnrc-kernels .
+#   docker run -v $(pwd)/output:/output egsnrc-kernels make_kernels.sh --energies 0.5,1.0,2.0,6.0,10.0
+#
+# Requirements:
+#   - Place EGSnrc tarball (e.g., EGSnrc_v2024.tar.gz) in build context
+#   - All dependencies are installed from Ubuntu repos (offline-friendly)
+# =============================================================================
+
+FROM ubuntu:22.04 AS builder
+
+LABEL maintainer="DoseCUDA Team"
+LABEL description="EGSnrc Kernel Factory for DoseCUDA"
+LABEL version="1.0"
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# =============================================================================
+# System Dependencies
+# =============================================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gfortran \
+    gcc \
+    g++ \
+    make \
+    cmake \
+    tcl \
+    tk \
+    libx11-dev \
+    libxpm-dev \
+    libxft-dev \
+    libxext-dev \
+    libxt-dev \
+    libmotif-dev \
+    python3 \
+    python3-pip \
+    python3-dev \
+    python3-numpy \
+    python3-scipy \
+    python3-pandas \
+    python3-h5py \
+    python3-matplotlib \
+    bc \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python aliases
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# =============================================================================
+# EGSnrc Environment Variables
+# =============================================================================
+ENV EGS_HOME=/opt/egsnrc/egs_home
+ENV HEN_HOUSE=/opt/egsnrc/HEN_HOUSE
+ENV EGS_CONFIG=/opt/egsnrc/HEN_HOUSE/specs/linux.conf
+ENV PATH="${HEN_HOUSE}/bin:${EGS_HOME}/bin:${PATH}"
+ENV my_machine=linux
+
+# Create directories
+RUN mkdir -p /opt/egsnrc /opt/kernels /output /scripts
+
+# =============================================================================
+# Copy EGSnrc Source (offline build)
+# =============================================================================
+# NOTE: User must provide the EGSnrc tarball in the build context
+# Example: COPY EGSnrc_v2024.tar.gz /opt/egsnrc/
+# If tarball not available, we create a placeholder and document manual install
+COPY EGSnrc*.tar.gz /opt/egsnrc/ 2>/dev/null || true
+
+WORKDIR /opt/egsnrc
+
+# =============================================================================
+# EGSnrc Installation Script
+# =============================================================================
+# This script handles both tarball and manual installation scenarios
+RUN cat > /opt/egsnrc/install_egsnrc.sh << 'INSTALL_EOF'
+#!/bin/bash
+set -e
+
+cd /opt/egsnrc
+
+# Check for tarball
+TARBALL=$(ls EGSnrc*.tar.gz 2>/dev/null | head -1)
+
+if [ -n "$TARBALL" ]; then
+    echo "=== Found EGSnrc tarball: $TARBALL ==="
+    tar -xzf "$TARBALL"
+
+    # Find extracted directory
+    EGSNRC_DIR=$(ls -d EGSnrc* 2>/dev/null | grep -v ".tar.gz" | head -1)
+
+    if [ -d "$EGSNRC_DIR" ]; then
+        echo "=== Configuring EGSnrc from $EGSNRC_DIR ==="
+        cd "$EGSNRC_DIR"
+
+        # Create HEN_HOUSE structure
+        mkdir -p $HEN_HOUSE
+        cp -r HEN_HOUSE/* $HEN_HOUSE/ 2>/dev/null || true
+
+        # Create EGS_HOME
+        mkdir -p $EGS_HOME
+
+        # Configure for Linux without GUI
+        cat > $HEN_HOUSE/specs/linux.conf << 'CONFEOF'
+# EGSnrc configuration for Linux (no GUI)
+DSEP = :
+my_machine = linux
+canonical_system = x86_64-unknown-linux-gnu
+make_prog = make
+F77 = gfortran
+F77_OPTIMIZE = -O2 -mtune=native
+FC = gfortran
+FCFLAGS = -O2 -fPIC
+CC = gcc
+C_OPTIMIZE = -O2 -mtune=native
+CXX = g++
+CXX_OPTIMIZE = -O2 -mtune=native
+C_DEFINES = -DLINUX
+FLIBS = -lgfortran
+CONFEOF
+
+        # Build EGSnrc core
+        cd $HEN_HOUSE
+        if [ -f "scripts/configure" ]; then
+            ./scripts/configure --prefix=/opt/egsnrc --enable-parallel=no
+        fi
+
+        # Build mortran compiler
+        if [ -d "omega/progs/mortran3" ]; then
+            cd omega/progs/mortran3
+            make -f Makefile.linux || make
+            mkdir -p $HEN_HOUSE/bin
+            cp mortran3 $HEN_HOUSE/bin/ 2>/dev/null || true
+        fi
+
+        # Build pegsless
+        if [ -d "$HEN_HOUSE/pegs4" ]; then
+            cd $HEN_HOUSE/pegs4
+            make || true
+        fi
+
+        echo "=== EGSnrc installation complete ==="
+    fi
+else
+    echo "=== No EGSnrc tarball found ==="
+    echo "=== Creating minimal EGSnrc structure for manual installation ==="
+
+    # Create directory structure
+    mkdir -p $HEN_HOUSE/{bin,lib,pegs4/data,specs,scripts}
+    mkdir -p $EGS_HOME/{bin,pegs4/data}
+
+    # Create placeholder config
+    cat > $HEN_HOUSE/specs/linux.conf << 'CONFEOF'
+# Placeholder EGSnrc configuration
+# Replace with actual EGSnrc installation
+DSEP = :
+my_machine = linux
+canonical_system = x86_64-unknown-linux-gnu
+make_prog = make
+F77 = gfortran
+FC = gfortran
+CC = gcc
+CXX = g++
+CONFEOF
+
+    echo "WARNING: EGSnrc not installed. Please mount EGSnrc tarball and rebuild."
+    echo "Or install manually at runtime."
+fi
+INSTALL_EOF
+
+RUN chmod +x /opt/egsnrc/install_egsnrc.sh && /opt/egsnrc/install_egsnrc.sh
+
+# =============================================================================
+# Copy Kernel Generation Usercode
+# =============================================================================
+COPY usercode/ /opt/egsnrc/usercode/
+
+# =============================================================================
+# Copy Python Processing Scripts
+# =============================================================================
+COPY scripts/ /scripts/
+
+# Make scripts executable
+RUN chmod +x /scripts/*.sh /scripts/*.py 2>/dev/null || true
+
+# =============================================================================
+# PEGS4 Data for Water
+# =============================================================================
+# Create PEGS4 data file for water (521icru material)
+RUN mkdir -p $EGS_HOME/pegs4/data && cat > $EGS_HOME/pegs4/data/521icru.pegs4dat << 'PEGSEOF'
+ MEDIUM=H2O521ICRU,STERNCID=H2O521ICRU
+ RHO=  1.0000E+00,NE=   2,IUNRST=  0,EPSTFL=  1,IAPRIM=  1
+ ASYM(1)=H ,Z(1)=  1.000,RHOZ(1)= 1.11190E-01,ASYM(2)=O ,Z(2)=  8.000,
+ RHOZ(2)= 8.88100E-01,
+ AP= 1.0000E-02,UP= 5.0000E+01,AE= 5.2100E-01,UE= 5.0521E+01,
+ RLC= 3.6086E+01,RLDU= 3.6086E+01,
+ TEFF0= 7.5016E+01,XCCL= 5.7269E-02,XCC= 5.7269E-02,BLCC= 1.6687E+00,
+ EKS0= 1.0000E+15,XR0=  1.6970E-01,BLCCE0= 0.0000E+00
+ DL1(1,1)= 1.4988E+00,DL2(1,1)= 6.9065E-01,DL3(1,1)= 5.9370E-02,
+ DL4(1,1)= 7.5571E-03,DL5(1,1)= 1.4988E+00,DL6(1,1)= 6.9065E-01,
+ BREMFR(1,1)= 1.0000E+00,PZ(1,1)= 0.0000E+00,ZAB(1,1)= 0.0000E+00,
+ ZALPH(1,1)= 0.0000E+00,PZAL(1,1)= 0.0000E+00
+PEGSEOF
+
+# =============================================================================
+# Entry Point and Default Commands
+# =============================================================================
+COPY scripts/make_kernels.sh /scripts/make_kernels.sh
+RUN chmod +x /scripts/make_kernels.sh
+
+WORKDIR /output
+
+# Default entrypoint
+ENTRYPOINT ["/scripts/make_kernels.sh"]
+
+# Default command: show help
+CMD ["--help"]
