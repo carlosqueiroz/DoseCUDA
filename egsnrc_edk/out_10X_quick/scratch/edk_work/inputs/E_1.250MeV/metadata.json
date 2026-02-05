@@ -1,0 +1,8 @@
+{
+  "energy_MeV": 1.25,
+  "input_path": "/scratch/edk_work/inputs/E_1.250MeV/edknrc.egsinp",
+  "theta_max_deg": 180.0,
+  "ncones": 48,
+  "dr_cm": 0.05,
+  "rmax_cm": 20.0
+}

@@ -1,0 +1,57 @@
+# Default 10 MV (10X) monoenergetic kernel grid for EDKnrc
+energies_MeV:
+  # dense around 1-10 MeV, tails to 0.2 and 20 MeV
+  - 0.20
+  - 0.30
+  - 0.40
+  - 0.50
+  - 0.60
+  - 0.80
+  - 1.00
+  - 1.25
+  - 1.50
+  - 1.75
+  - 2.00
+  - 2.50
+  - 3.00
+  - 3.50
+  - 4.00
+  - 4.50
+  - 5.00
+  - 6.00
+  - 7.00
+  - 8.00
+  - 9.00
+  - 10.0
+  - 12.0
+  - 14.0
+  - 16.0
+  - 18.0
+  - 20.0
+
+ncones_theta: 48
+delta_theta_deg: 3.75
+# theta grid from 0 to 180 deg; CCCS can consume 0-90 by folding if needed
+theta_max_deg: 180.0
+
+# radial grid
+dr_mm: 0.5
+rmax_cm: 20.0
+
+# transport / simulation params
+ncases: 200000000   # 2e8 histories (adjust for runtime)
+ifull: 1
+n_batch: 1
+rng_seeds: [12345, 23456]
+
+# material and data
+medium_name: H2O521ICRU
+pegs4_data_file: 521icru.pegs4dat
+
+# output/normalization
+write_cumulative: true
+normalization: per_incident_energy_interacting_at_origin
+norm_per_particle: 1.0
+
+# optional overrides
+# egs_home: /opt/EGSnrc/egs_home

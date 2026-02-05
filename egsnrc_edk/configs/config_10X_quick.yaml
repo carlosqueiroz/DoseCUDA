@@ -1,0 +1,47 @@
+# Quick/CI-friendly version of 10X grid with fewer histories
+energies_MeV:
+  - 0.20
+  - 0.30
+  - 0.40
+  - 0.50
+  - 0.60
+  - 0.80
+  - 1.00
+  - 1.25
+  - 1.50
+  - 1.75
+  - 2.00
+  - 2.50
+  - 3.00
+  - 3.50
+  - 4.00
+  - 4.50
+  - 5.00
+  - 6.00
+  - 7.00
+  - 8.00
+  - 9.00
+  - 10.0
+  - 12.0
+  - 14.0
+  - 16.0
+  - 18.0
+  - 20.0
+
+ncones_theta: 48
+theta_max_deg: 180.0
+
+dr_mm: 0.5
+rmax_cm: 20.0
+
+ncases: 50000         # reduced for quick validation
+ifull: 1
+n_batch: 1
+rng_seeds: [12345, 23456]
+
+medium_name: H2O521ICRU
+pegs4_data_file: 521icru.pegs4dat
+
+write_cumulative: true
+normalization: per_incident_energy_interacting_at_origin
+norm_per_particle: 1.0

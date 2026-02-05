@@ -1,0 +1,8 @@
+{
+  "energy_MeV": 1.0,
+  "input_path": "scratch_smoke/edk_work_new/E_1.000MeV/edknrc.egsinp",
+  "theta_max_deg": 180.0,
+  "ncones": 8,
+  "dr_cm": 0.1,
+  "rmax_cm": 2.0
+}
